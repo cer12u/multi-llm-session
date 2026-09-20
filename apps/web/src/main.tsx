@@ -16,7 +16,7 @@ function App(){
   const [settingsText,setSettingsText]=useState(''),[importText,setImportText]=useState(''),[connection,setConnection]=useState('未接続');
   const messageKey=useRef<{signature:string;key:string}|null>(null);
   const operator=auth?.role==='operator';
-  async function api<T>(path:string,body?:unknown,idem=crypto.randomUUID()):Promise<T>{
+  async function api<T>(path:string,body?:unknown,idem:string=crypto.randomUUID()):Promise<T>{
     let response:Response|undefined;
     for(let attempt=0;attempt<2;attempt++){
       try{response=await fetch(path,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:body===undefined?{}:{'content-type':'application/json','x-csrf-token':auth?.csrf??'','idempotency-key':idem},body:body===undefined?undefined:JSON.stringify(body)});break;}

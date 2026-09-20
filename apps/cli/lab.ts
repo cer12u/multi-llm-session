@@ -19,7 +19,7 @@ try{
     const port=await freePort(),configPath=join(root,`config-${count}.json`);
     const slots=Array.from({length:count},(_,i)=>({id:`worker-${i}`,tokenEnv:`WORKER_${i}_TOKEN`}));
     await writeFile(configPath,JSON.stringify({workerSlots:slots}));
-    const env={...process.env,APP_CONFIG:configPath,PORT:String(port),PUBLIC_ORIGIN:`http://127.0.0.1:${port}`,DB_PATH:join(root,`lab-${count}.sqlite`)};
+    const env:NodeJS.ProcessEnv={...process.env,APP_CONFIG:configPath,PORT:String(port),PUBLIC_ORIGIN:`http://127.0.0.1:${port}`,DB_PATH:join(root,`lab-${count}.sqlite`)};
     if(!live){delete env.MODEL_PROVIDER;delete env.MODEL_NAME;delete env.MODEL_BASE_URL;delete env.LLM_API_KEY;env.ALLOW_LIVE_MODELS='0';}
     const cluster=await startCluster(env,true),client=new CoreClient(cluster.base,cluster.token);
     try{

@@ -32,7 +32,7 @@ export async function startCluster(input:NodeJS.ProcessEnv=process.env,quiet=fal
     }
     if(!ready)throw new Error('Core did not become ready');
     for(const slot of slots){
-      const workerEnv={...env,CORE_URL:base,WORKER_TOKEN:env[slot.tokenEnv],WORKER_SLOT:slot.id};
+      const workerEnv:NodeJS.ProcessEnv={...env,CORE_URL:base,WORKER_TOKEN:env[slot.tokenEnv],WORKER_SLOT:slot.id};
       delete workerEnv.ADMIN_TOKEN;delete workerEnv.VIEWER_TOKEN;delete workerEnv.APP_CONFIG;delete workerEnv.DB_PATH;
       for(const other of slots)delete workerEnv[other.tokenEnv];
       children.push(launch('../agent-worker/main',workerEnv));

@@ -26,7 +26,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   };
   app.addHook('onRequest',async(req,reply)=>{
     for(const [k,v] of Object.entries(security)) reply.header(k,v);
-    ensure(header(req,'host')===new URL(config.publicOrigin).host,403,'INVALID_HOST');
+    ensure(header(req,'host')===new URL(config.publicOrigin).host || (req.url.startsWith('/v1/worker/') && Object.values(config.workerTokens).some(t=>equal(header(req,'authorization'),'Bearer '+t))),403,'INVALID_HOST');
     const origin=header(req,'origin'); if(origin) ensure(origin===config.publicOrigin,403,'INVALID_ORIGIN');
   });
   app.setErrorHandler((error,_req,reply)=>{
@@ -67,7 +67,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
     ensure(role,401,'INVALID_LOGIN');
     for(const [id,login] of logins) if(login.expires<=now) logins.delete(id);
     ensure(logins.size<100,503,'LOGIN_CAPACITY');
-    const id=randomBytes(32).toString('base64url'),login={role,csrf:randomBytes(32).toString('base64url'),expires:now+8*3600000}; logins.set(id,login);
+    const id=randomBytes(32).toString('base64url');const login:Login={role,csrf:randomBytes(32).toString('base64url'),expires:now+8*3600000}; logins.set(id,login);
     reply.header('set-cookie',`mls_session=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800${config.publicOrigin.startsWith('https:')?'; Secure':''}`);
     return {role:login.role,csrf:login.csrf};
   });

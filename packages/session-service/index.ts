@@ -222,6 +222,7 @@ export class SessionService {
       this.store.run('UPDATE sessions SET revision=revision+1 WHERE id=?',session);
       this.store.run('UPDATE messages SET text=?,deleted=?,revision=? WHERE id=?',text??'',text===null?1:0,s.revision+1,messageId);
       this.store.run('DELETE FROM messages_fts WHERE message_id=?',messageId);
+      this.store.run('DELETE FROM memories WHERE EXISTS (SELECT 1 FROM json_each(memories.sources_json) WHERE value=?)',messageId);
       if(text!==null) this.store.run('INSERT INTO messages_fts(message_id,session_id,text) VALUES(?,?,?)',messageId,session,text);
       for(const a of this.agents(session)) this.wake(a.id,'EDIT');
       this.emit(session,text===null?'message.deleted':'message.updated',{messageId});
@@ -266,7 +267,7 @@ export class SessionService {
   }
   private context(agent: AgentRow, candidate?: CandidateRow): Context {
     const s=this.session(agent.session_id),st=settingsOf(s);
-    let rows=this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY revision DESC LIMIT ?',s.id,st.contextMessages).reverse();
+    let rows=this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT ?',s.id,st.contextMessages).reverse();
     let chars=rows.reduce((n,m)=>n+m.text.length,0);
     while(rows.length>1&&chars>st.contextChars/2) { chars-=rows[0].text.length; rows.shift(); }
     const messages=rows.map(m=>this.publicMessage(m));
@@ -432,7 +433,7 @@ export class SessionService {
     if(this.timeExceeded(s)) { this.pauseForLimit(id,'MAX_DURATION'); return null; }
     if(s.bot_count>=st.maxMessages) { this.pauseForLimit(id,'MAX_MESSAGES'); return null; }
     if(this.now()<s.last_post_at+st.postGapMs) return null;
-    const latest=this.store.get<MessageRow>('SELECT * FROM messages WHERE session_id=? AND deleted=0 ORDER BY revision DESC LIMIT 1',id);
+    const latest=this.store.get<MessageRow>('SELECT * FROM messages WHERE session_id=? AND deleted=0 ORDER BY rowid DESC LIMIT 1',id);
     const targets=latest?JSON.parse(latest.addressed_json) as string[]:[];
     const all=this.store.all<CandidateRow>("SELECT * FROM candidates WHERE session_id=? AND state='READY'",id);
     const eligible=all.map(c=>{ const a=this.agent(c.agent_id); return {
@@ -518,7 +519,7 @@ export class SessionService {
   private cursor(session: string, n: number): string { return session+':'+n; }
   snapshot(id: string): Snapshot {
     return this.store.tx(()=>({session:this.publicSession(this.session(id)),agents:this.agents(id).map(a=>this.publicAgent(a)),
-      messages:this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY revision DESC LIMIT 200',id).reverse().map(m=>this.publicMessage(m)),
+      messages:this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT 200',id).reverse().map(m=>this.publicMessage(m)),
       cursor:this.cursor(id,this.store.get<{n:number}>('SELECT COALESCE(MAX(id),0) n FROM events WHERE session_id=?',id)!.n)}));
   }
   eventsAfter(id: string, cursor: string, limit=100): PublicEvent[] {
@@ -548,6 +549,6 @@ export class SessionService {
   exportSession(id: string): Record<string,unknown> {
     const s=this.session(id); return {manifest:{schemaVersion:1,commit:process.env.GITHUB_SHA??'local',session:this.publicSession(s),sqliteVersion:this.store.sqliteVersion,
       characterHashes:this.agents(id).map(a=>({id:a.id,character:hash(characterOf(a)),profile:hash(profileOf(a))})),exportedAt:new Date(this.now()).toISOString()},
-      transcript:this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY revision',id).map(m=>this.publicMessage(m)),metrics:this.metrics(id)};
+      transcript:this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY rowid',id).map(m=>this.publicMessage(m)),metrics:this.metrics(id)};
   }
 }
