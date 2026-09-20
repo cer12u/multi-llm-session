@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 import { resolve, sep, extname } from 'node:path';
 import { z, ZodError } from 'zod';
 import { AppError, ensure, Id, UsageSchema, ErrorCodeSchema, type ModelErrorCode } from '../../packages/contracts/index.js';
+import { LookupRequestSchema, Slug } from '../../packages/contracts/index.js';
+import { credential } from '../../packages/config/credentials.js';
 import { SessionService } from '../../packages/session-service/index.js';
 
 type Role='operator'|'viewer';
@@ -11,6 +13,7 @@ type Login={role:Role;csrf:string;expires:number};
 function equal(a:string,b:string):boolean { const aa=Buffer.from(a),bb=Buffer.from(b); return aa.length===bb.length&&timingSafeEqual(aa,bb); }
 function header(request:FastifyRequest,name:string):string { const value=request.headers[name]; return typeof value==='string'?value:''; }
 const ParamId=z.object({id:Id});
+const PageQuery=z.object({cursor:z.string().max(2048).optional(),limit:z.coerce.number().int().min(1).max(200).default(100)}).strict();
 const RunAuth=z.object({epoch:z.number().int().positive(),token:Id}).strict();
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.map':'application/json','.svg':'image/svg+xml'};
 
@@ -77,9 +80,15 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
     logins.delete(cookieId(req));service.changes.emit('changed');reply.header('set-cookie','mls_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return {ok:true};
   });
   app.get('/v1/capabilities',async req=>{principal(req);return {
-    profiles:config.profiles.map(p=>({id:p.id,provider:p.provider,model:p.model})),
+    profiles:service.modelProfiles().map(p=>({id:p.id,provider:p.provider,model:p.model})),
     slots:Object.keys(config.workerTokens),defaults:config.defaults,liveEnabled:config.allowLive,
   };});
+  app.get('/v1/model-profiles',async req=>{principal(req,false,true);return service.providerDiagnostics().map(item=>{
+    let credentialConfigured=false;try{credentialConfigured=!item.profile.authRequired||!!credential(item.profile);}catch{}
+    return {...item,credentialConfigured:item.profile.provider==='mock'||credentialConfigured,liveEnabled:config.allowLive};
+  });});
+  app.post('/v1/model-profiles',async req=>{principal(req,true,true);return service.putModelProfile(req.body);});
+  app.post('/v1/model-profiles/:profile/retry',async req=>{principal(req,true,true);const {profile}=z.object({profile:Slug}).parse(req.params);return service.retryProvider(profile,key(req));});
   app.get('/v1/characters',async req=>{
     const p=principal(req);return service.characters().map(c=>p.role==='operator'?c:{schemaVersion:c.schemaVersion,id:c.id,version:c.version,name:c.name,presentationRef:c.presentationRef});
   });
@@ -94,6 +103,12 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
     principal(req,true,true);const body=z.object({agentId:Id,enabled:z.boolean()}).strict().parse(req.body);
     service.setAgentEnabled(sessionId(req),body.agentId,body.enabled,key(req));return {ok:true};
   });
+  app.post('/v1/sessions/:id/budget',async req=>{principal(req,true,true);z.object({}).strict().parse(req.body);return service.renewBudget(sessionId(req),key(req));});
+  app.post('/v1/sessions/:id/agents/:agentId/retry',async req=>{principal(req,true,true);const p=z.object({id:Id,agentId:Id}).parse(req.params);return service.retryAgent(p.id,p.agentId,key(req));});
+  app.get('/v1/sessions/:id/history',async req=>{principal(req);return service.pages.history(sessionId(req),PageQuery.parse(req.query));});
+  app.get('/v1/sessions/:id/threads/:messageId',async req=>{principal(req);const p=z.object({id:Id,messageId:Id}).parse(req.params);return service.pages.thread(p.id,p.messageId,PageQuery.parse(req.query));});
+  app.get('/v1/sessions/:id/search-page',async req=>{principal(req);const {q,...options}=PageQuery.extend({q:z.string().min(1).max(200)}).parse(req.query);return service.pages.search(sessionId(req),q,options);});
+  app.post('/v1/sessions/:id/messages/lookup',async req=>{principal(req);const {ids}=z.object({ids:z.array(Id).max(200)}).strict().parse(req.body);return service.pages.byIds(sessionId(req),ids);});
   app.get('/v1/sessions/:id/snapshot',async req=>{principal(req);return service.snapshot(sessionId(req));});
   app.post('/v1/sessions/:id/messages',async req=>{principal(req,true,true);return service.humanMessage(sessionId(req),req.body,key(req));});
   app.post('/v1/sessions/:id/messages/:messageId',async req=>{
@@ -135,12 +150,19 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   app.post('/v1/worker/claim',async req=>{const b=z.object({epoch:z.number().int().positive()}).strict().parse(req.body);return service.claim(worker(req),b.epoch);});
   app.post('/v1/worker/runs/:id/heartbeat',async req=>{const b=RunAuth.parse(req.body);return service.heartbeat(worker(req),b.epoch,sessionId(req),b.token);});
   app.post('/v1/worker/runs/:id/calls',async req=>{
-    const b=RunAuth.extend({requestKey:z.string().min(8).max(128),stage:z.enum(['primary','repair'])}).parse(req.body);
+    const b=RunAuth.extend({requestKey:z.string().min(8).max(128),stage:z.enum(['primary','repair','lookup'])}).parse(req.body);
     return service.reserveCall(worker(req),b.epoch,sessionId(req),b.token,b.requestKey,b.stage);
   });
   app.post('/v1/worker/runs/:id/calls/:callId',async req=>{
-    const p=z.object({id:Id,callId:Id}).parse(req.params),b=z.object({token:Id,usage:UsageSchema,error:ErrorCodeSchema.nullable()}).strict().parse(req.body);
-    return service.finishCall(worker(req),p.id,b.token,p.callId,b.usage,b.error);
+    const p=z.object({id:Id,callId:Id}).parse(req.params),b=z.object({token:Id,usage:UsageSchema,error:ErrorCodeSchema.nullable(),retryAfterMs:z.number().int().min(0).max(86400000).default(0)}).strict().parse(req.body);
+    return service.finishCall(worker(req),p.id,b.token,p.callId,b.usage,b.error,b.retryAfterMs);
+  });
+  app.post('/v1/worker/runs/:id/lookup',async req=>{
+    const b=RunAuth.extend({requestKey:z.string().min(8).max(128),requests:z.array(LookupRequestSchema).min(1).max(3)}).parse(req.body);
+    return service.retrieve(worker(req),b.epoch,sessionId(req),b.token,b.requestKey,b.requests);
+  });
+  app.get('/v1/worker/agents/:id/memory-page',async req=>{
+    const id=sessionId(req);ownAgent(req,id);const {q,...options}=PageQuery.extend({q:z.string().max(200).default('')}).parse(req.query);return service.pages.memories(id,q,options);
   });
   app.post('/v1/worker/runs/:id/result',async req=>{const b=RunAuth.extend({output:z.unknown()}).parse(req.body);return service.completeRun(worker(req),b.epoch,sessionId(req),b.token,b.output);});
   app.post('/v1/worker/runs/:id/failure',async req=>{const b=RunAuth.extend({code:ErrorCodeSchema}).parse(req.body);return service.failRun(worker(req),b.epoch,sessionId(req),b.token,b.code as ModelErrorCode);});

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { PublicMessage } from '../packages/contracts/index.js';
-import { avatarTone, dayKey, initial, isGrouped, preview, rootMessageId, shouldSendOnEnter, threadMessages } from '../apps/web/src/chat-model.js';
-const message = (id: string, overrides: Partial<PublicMessage> = {}): PublicMessage => ({ id, sessionId: 'session', revision: 1, authorId: 'agent-a', authorName: '葵', characterId: 'a', characterVersion: 1, text: '試験用の発言', act: 'comment', replyTo: null, addressedTo: [], deleted: false, episode: 1, createdAt: Date.parse('2026-09-20T01:00:00Z'), ...overrides });
+import { avatarTone, dayKey, dayLabel, initial, isGrouped, preview, rootMessageId, shouldSendOnEnter, threadMessages } from '../apps/web/src/chat-model.js';
+const message = (id: string, overrides: Partial<PublicMessage> = {}): PublicMessage => ({ sequence:1,threadRootId:id,id, sessionId: 'session', revision: 1, authorId: 'agent-a', authorName: '葵', characterId: 'a', characterVersion: 1, text: '試験用の発言', act: 'comment', replyTo: null, addressedTo: [], deleted: false, episode: 1, createdAt: Date.parse('2026-09-20T01:00:00Z'), ...overrides });
 describe('chat projections (not model conversation quality)', () => {
   it('groups only consecutive messages by the same author within the same day and episode', () => {
     const first = message('1');

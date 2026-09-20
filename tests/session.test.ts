@@ -104,9 +104,9 @@ describe('persistent session invariants',()=>{
     expect(f.service.session(f.id).lifecycle).toBe('PAUSED');expect(f.service.session(f.id).activity).toBe('BUDGET_PAUSED');expect(f.service.session(f.id).call_count).toBe(1);
   });
   it('stops new publication at message and duration limits',()=>{
-    const f=setup(3,{maxMessages:1,maxDurationMs:1000});f.start();f.speak(required(f.claim()));f.finish(required(f.claim()),{decision:'DRAFT',text:'一つだけ'});
+    const f=setup(3,{maxMessages:1,maxDurationMs:1000,selfWakeEnabled:false});f.start();f.speak(required(f.claim()));f.finish(required(f.claim()),{decision:'DRAFT',text:'一つだけ'});
     expect(f.service.commitNext(f.id)).not.toBeNull();expect(f.service.session(f.id).stop_reason).toBe('MAX_MESSAGES');expect(f.claim()).toBeNull();
-    const other=setup(3,{maxDurationMs:1000});other.start();other.advance(1000);other.service.tick();expect(other.service.session(other.id).stop_reason).toBe('MAX_DURATION');
+    const other=setup(3,{maxDurationMs:1000,selfWakeEnabled:false});other.start();other.advance(1000);other.service.tick();expect(other.service.session(other.id).stop_reason).toBe('MAX_DURATION');
   });
   it('does not return private memories to a different agent',()=>{
     const f=setup(),message=f.say('出典のある発言'),[a,b]=f.service.agents(f.id);

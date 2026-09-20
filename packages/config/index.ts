@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { credential, validateProfileUrl } from './credentials.js';
+import { providerScope } from '../provider-state/index.js';
 import { z } from 'zod';
 import { CharacterSchema, ModelProfileSchema, SettingsSchema, ensure, type Character, type ModelProfile, type Settings } from '../contracts/index.js';
 
@@ -30,13 +32,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     authRequired: env.MODEL_AUTH_REQUIRED !== '0',
   })];
   for (const p of profiles) {
-    if (p.provider === 'mock') continue;
-    ensure(allowLive, 500, 'LIVE_DISABLED'); ensure(p.baseUrl, 500, 'MISSING_MODEL_URL');
-    const url = new URL(p.baseUrl);
-    ensure(!url.username && !url.password && !url.search && !url.hash, 500, 'UNSAFE_MODEL_URL');
-    const local = ['localhost','127.0.0.1','[::1]'].includes(url.hostname);
-    ensure(url.protocol === 'https:' || (p.allowLocalHttp && local && url.protocol === 'http:'), 500, 'MODEL_HTTPS_REQUIRED');
-    ensure(!p.authRequired || (p.apiKeyEnv && env[p.apiKeyEnv]), 500, 'MISSING_MODEL_KEY');
+    validateProfileUrl(p);
+    // Registering a profile need not start it. Explicit opt-in still gates all live sessions.
+    if (p.provider !== 'mock' && allowLive && p.authRequired) ensure(credential(p,env),500,'MISSING_MODEL_KEY');
+  }
+  const shared = new Map<string,string>();
+  for(const p of profiles) {
+    const scope=providerScope(p),policy=JSON.stringify([p.maxConcurrent,p.failureThreshold,p.circuitCooldownMs]);
+    ensure(!shared.has(scope)||shared.get(scope)===policy,500,'CONFLICTING_PROVIDER_POLICY'); shared.set(scope,policy);
   }
   ensure(new Set(profiles.map(p=>p.id)).size === profiles.length, 500, 'DUPLICATE_PROFILE');
   const slots = file.workerSlots ?? ['a','b','c'].map(x=>({ id:'worker-'+x, tokenEnv:'WORKER_'+x.toUpperCase()+'_TOKEN' }));
@@ -58,6 +61,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   return { dbPath: env.DB_PATH ?? 'data/conversation.sqlite', host: env.APP_BIND ?? '127.0.0.1', port, publicOrigin,
     adminToken, viewerToken, workerTokens, profiles, characters: file.characters ?? defaultCharacters,
-    defaults: file.sessionDefaults ?? SettingsSchema.parse({}), allowLive, maxRunning: 1, maxConcurrentProvider: 3,
+    defaults: file.sessionDefaults ?? SettingsSchema.parse({}), allowLive, maxRunning: 1, maxConcurrentProvider: 32,
     restartPolicy: env.RESTART_POLICY === 'paused' ? 'paused' : 'resume', feeds: file.feeds };
 }

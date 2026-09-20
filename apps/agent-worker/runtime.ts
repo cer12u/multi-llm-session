@@ -1,4 +1,5 @@
-import type { ClaimedRun, ModelErrorCode, Usage } from '../../packages/contracts/index.js';
+import { LookupSchema, type Context, type ClaimedRun, type ModelErrorCode, type Usage } from '../../packages/contracts/index.js';
+import { credential } from '../../packages/config/credentials.js';
 import { HttpModel, MockModel, ModelError, parseOutput, type Model } from '../../packages/models/index.js';
 
 export class CoreError extends Error {
@@ -40,25 +41,33 @@ export class WorkerRuntime {
     let callId:string|null=null;
     try {
       if(run.profile.provider!=='mock'&&this.env.ALLOW_LIVE_MODELS!=='1') throw new ModelError('CONFIG_ERROR');
-      const model=this.factory?.(run)??(run.profile.provider==='mock'?new MockModel():new HttpModel(run.profile,run.profile.apiKeyEnv?this.env[run.profile.apiKeyEnv]:undefined));
-      let invalid:string|undefined;
-      for(let attempt=0;attempt<2;attempt++) {
+      const model=this.factory?.(run)??(run.profile.provider==='mock'?new MockModel():new HttpModel(run.profile,credential(run.profile,this.env)));
+      let invalid:string|undefined,context=run.context,lookups=0,repaired=false;
+      let stage:'primary'|'lookup'|'repair'='primary';
+      for(let attempt=0;attempt<4;attempt++) {
         if(combined.aborted) throw new ModelError('CANCELLED');
         for(;;) {
-          try { callId=(await this.client.request<{id:string}>(base+'/calls',{...auth,requestKey:run.id+':'+attempt,stage:attempt?'repair':'primary'},combined)).id; break; }
-          catch(e) { if(e instanceof CoreError&&e.status===429) { await delay(500,combined); if(combined.aborted) throw new ModelError('CANCELLED'); continue; } throw e; }
+          try {callId=(await this.client.request<{id:string}>(base+'/calls',{...auth,requestKey:run.id+':'+attempt,stage},combined)).id;break;}
+          catch(e) {if(e instanceof CoreError&&e.status===429){await delay(500,combined);if(combined.aborted)throw new ModelError('CANCELLED');continue;}throw e;}
         }
-        const result=await model.complete(run.kind,run.context,{signal:AbortSignal.any([combined,AbortSignal.timeout(run.timeoutMs)]),maxChars:run.contextChars,...invalid?{repair:invalid}:{}});
-        await this.retryResult(base+'/calls/'+callId,{token:run.token,usage:result.usage,error:null}); callId=null;
+        const result=await model.complete(run.kind,context,{signal:AbortSignal.any([combined,AbortSignal.timeout(run.timeoutMs)]),maxChars:run.contextChars,...invalid?{repair:invalid}:{}});
+        await this.retryResult(base+'/calls/'+callId,{token:run.token,usage:result.usage,error:null});callId=null;
         let parsed:unknown;
-        try { parsed=parseOutput(run.kind,result.text,run.profile.jsonMode==='schema'&&run.profile.provider!=='mock'); }
-        catch(e) { if(attempt===0) { invalid=result.text.slice(0,2000); continue; } throw e; }
-        await this.retryResult(base+'/result',{...auth,output:parsed}); return true;
+        try {parsed=parseOutput(run.kind,result.text,run.profile.jsonMode==='schema'&&run.profile.provider!=='mock');}
+        catch(e) {if(!repaired){repaired=true;invalid=result.text.slice(0,2000);stage='repair';continue;}throw e;}
+        const lookup=LookupSchema.safeParse(parsed);
+        if(lookup.success) {
+          if(lookups>=2)throw new ModelError('FORMAT_ERROR');
+          // Core performs ownership checks and stores exactly what was retrieved with this run.
+          context=await this.client.request<Context>(base+'/lookup',{...auth,requestKey:run.id+':lookup:'+lookups,requests:lookup.data.requests},combined);
+          lookups++;stage='lookup';invalid=undefined;continue;
+        }
+        await this.retryResult(base+'/result',{...auth,output:parsed});return true;
       }
       throw new ModelError('FORMAT_ERROR');
     } catch(e) {
       const code:ModelErrorCode=e instanceof ModelError?e.code:e instanceof CoreError&&e.status===422?'FORMAT_ERROR':combined.aborted?'CANCELLED':'API_ERROR';
-      if(callId) await this.client.request(base+'/calls/'+callId,{token:run.token,usage:{inputTokens:null,outputTokens:null} satisfies Usage,error:code}).catch(()=>{});
+      if(callId) await this.client.request(base+'/calls/'+callId,{token:run.token,usage:{inputTokens:null,outputTokens:null} satisfies Usage,error:code,retryAfterMs:e instanceof ModelError?e.retryAfterMs:0}).catch(()=>{});
       // A stale generation is an expected cancellation, not a fresh model failure.
       if(!(e instanceof CoreError&&e.status===409)) await this.client.request(base+'/failure',{...auth,code}).catch(()=>{});
       return true;
