@@ -1,0 +1,28 @@
+name: Session application CI
+on:
+  push:
+    branches: [main, feat/session-runtime]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: session-ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Record validation scope
+        run: echo 'Compilation and production build only; behavioral tests are being added separately.' >> "$GITHUB_STEP_SUMMARY"
