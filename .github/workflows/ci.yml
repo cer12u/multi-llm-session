@@ -26,6 +26,8 @@ jobs:
       - name: Unit, transaction, recovery, privacy and HTTP tests
         run: npm test
       - run: npm run build
+      - name: Export contract schemas
+        run: node dist/apps/cli/schema.js
       - name: Three, five and eight independent worker processes
         run: npm run lab
       - name: Install the locked Chromium browser
@@ -69,6 +71,7 @@ jobs:
           done
           curl --fail --silent http://127.0.0.1:3000/healthz
           docker compose --env-file .env -f deploy/compose.yaml ps
+          docker compose --env-file .env -f deploy/compose.yaml exec -T core node --input-type=module < deploy/smoke.mjs
       - name: Stop test containers
         if: always()
         run: docker compose --env-file .env -f deploy/compose.yaml down --volumes

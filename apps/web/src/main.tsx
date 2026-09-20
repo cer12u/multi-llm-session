@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Character, PublicSession, Settings, Snapshot } from '../../../packages/contracts/index.js';
 import './style.css';
+import {subscribeSession} from './event-stream.js';
 
 type Auth={role:'operator'|'viewer';csrf:string};
 type Capabilities={profiles:{id:string;provider:string;model:string}[];slots:string[];defaults:Settings;liveEnabled:boolean};
@@ -16,6 +17,7 @@ function App(){
   const [settingsText,setSettingsText]=useState(''),[importText,setImportText]=useState(''),[connection,setConnection]=useState('未接続');
   const messageKey=useRef<{signature:string;key:string}|null>(null);
   const operator=auth?.role==='operator';
+  const currentSelection=useRef(selected);currentSelection.current=selected;
   async function api<T>(path:string,body?:unknown,idem:string=crypto.randomUUID()):Promise<T>{
     let response:Response|undefined;
     for(let attempt=0;attempt<2;attempt++){
@@ -29,7 +31,7 @@ function App(){
   const safe=(operation:()=>Promise<void>)=>{setError('');void operation().catch(e=>setError(e instanceof Error?e.message:'操作に失敗しました'));};
   async function refresh(id=selected){
     const list=await api<PublicSession[]>('/v1/sessions');setSessions(list);
-    if(id){const next=await api<Snapshot>(`/v1/sessions/${id}/snapshot`);setSnapshot(next);}
+    if(id){const next=await api<Snapshot>(`/v1/sessions/${id}/snapshot`);if(currentSelection.current===id)setSnapshot(next);}
   }
   async function initialize(){
     const [cs,cp,ss]=await Promise.all([api<Character[]>('/v1/characters'),api<Capabilities>('/v1/capabilities'),api<PublicSession[]>('/v1/sessions')]);
@@ -39,15 +41,12 @@ function App(){
   useEffect(()=>{void fetch('/v1/auth/me').then(async r=>{if(r.ok)setAuth(await r.json());}).catch(()=>{});},[]);
   useEffect(()=>{if(auth)safe(initialize);else{setSnapshot(null);setSessions([]);}},[auth?.role]);
   useEffect(()=>{
-    if(!auth||!selected)return;
-    let closed=false,stream:EventSource|null=null,timer:ReturnType<typeof setTimeout>|null=null;
-    safe(async()=>{
-      const next=await api<Snapshot>(`/v1/sessions/${selected}/snapshot`);if(closed)return;setSnapshot(next);setSettingsText(JSON.stringify(next.session.settings,null,2));
-      stream=new EventSource(`/v1/sessions/${selected}/events?cursor=${encodeURIComponent(next.cursor)}`);
-      stream.onopen=()=>setConnection('接続中');stream.onerror=()=>setConnection('再接続中');
-      stream.onmessage=()=>{if(timer)return;timer=setTimeout(()=>{timer=null;if(!closed)safe(()=>refresh(selected));},100);};
-    });
-    return()=>{closed=true;stream?.close();if(timer)clearTimeout(timer);setConnection('未接続');};
+    if(!auth||!selected)return;setSnapshot(null);let first=true;
+    const stop=subscribeSession(()=>api<Snapshot>(`/v1/sessions/${selected}/snapshot`),next=>{
+      setSnapshot(next);setSessions(values=>values.map(value=>value.id===next.session.id?next.session:value));
+      if(first){setSettingsText(JSON.stringify(next.session.settings,null,2));first=false;}
+    },setConnection);
+    return()=>{stop();setConnection('未接続');};
   },[selected,auth?.role]);
   useEffect(()=>{
     if(!showDiagnostic||!selected||!operator)return;

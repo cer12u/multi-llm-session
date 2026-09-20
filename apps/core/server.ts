@@ -74,7 +74,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   app.get('/v1/auth/me',async req=>{const p=principal(req);return {role:p.role,csrf:p.csrf};});
   app.post('/v1/auth/logout',async(req,reply)=>{
     principal(req); ensure(header(req,'origin')===config.publicOrigin,403,'ORIGIN_REQUIRED');
-    logins.delete(cookieId(req));reply.header('set-cookie','mls_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return {ok:true};
+    logins.delete(cookieId(req));service.changes.emit('changed');reply.header('set-cookie','mls_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return {ok:true};
   });
   app.get('/v1/capabilities',async req=>{principal(req);return {
     profiles:config.profiles.map(p=>({id:p.id,provider:p.provider,model:p.model})),
@@ -110,7 +110,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   app.get('/v1/sessions/:id/diagnostics',async req=>{principal(req,false,true);return service.diagnostics(sessionId(req));});
   app.get('/v1/sessions/:id/export',async(req,reply)=>{principal(req,false,true);const id=sessionId(req);reply.header('content-disposition',`attachment; filename="session-${id}.json"`);return service.exportSession(id);});
   app.get('/v1/sessions/:id/events',async(req,reply)=>{
-    const p=principal(req),id=sessionId(req);
+    const p=principal(req),id=sessionId(req);const loginId=header(req,'authorization').startsWith('Bearer ')?'':cookieId(req);const authorized=()=>p.expires>service.now()&&(!loginId||logins.get(loginId)===p);
     const query=z.object({cursor:z.string().max(100).optional()}).parse(req.query);
     let cursor=header(req,'last-event-id')||query.cursor||service.snapshot(id).cursor;
     service.eventsAfter(id,cursor,1); ensure(streams.size<50,503,'STREAM_LIMIT');
@@ -120,7 +120,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
     const close=()=>{if(closed)return;closed=true;clearInterval(timer);service.changes.off('changed',pump);streams.delete(close);reply.raw.end();};
     const pump=()=>{
       if(closed||pumping)return;
-      if(p.expires<=service.now()||reply.raw.writableLength>262144){close();return;}
+      if(!authorized()||reply.raw.writableLength>262144){close();return;}
       pumping=true;
       try {
         const events=service.eventsAfter(id,cursor);
@@ -128,7 +128,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
         if(events.length===100) setImmediate(pump);
       } catch {close();} finally {pumping=false;}
     };
-    const timer=setInterval(()=>{if(p.expires<=service.now())close();else {reply.raw.write(': heartbeat\n\n');pump();}},10000);
+    const timer=setInterval(()=>{if(!authorized())close();else {reply.raw.write(': heartbeat\n\n');pump();}},10000);
     streams.add(close);service.changes.on('changed',pump);reply.raw.on('close',close);pump();
   });
   app.post('/v1/worker/register',async req=>{z.object({}).strict().parse(req.body);return service.registerWorker(worker(req));});

@@ -15,5 +15,6 @@ test('creates a session, receives independent mock replies, pauses and reconnect
   await page.getByLabel('発言',{exact:true}).fill('<img src=x onerror="window.__injected=true">');await page.getByRole('button',{name:'送信',exact:true}).click();
   await expect(page.locator('article').last()).toContainText('<img src=x');expect(await page.evaluate(()=>('__injected' in window))).toBe(false);
   await page.getByRole('button',{name:'診断',exact:true}).click();await expect(page.getByRole('heading',{name:'管理者向け診断'})).toBeVisible();
+  await page.screenshot({path:'artifacts/session-ui.png',fullPage:true});
   await second.close();await page.getByRole('button',{name:'終了',exact:true}).click();await expect(page.getByLabel('発言',{exact:true})).toHaveCount(0);
 });

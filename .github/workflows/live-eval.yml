@@ -34,7 +34,7 @@ jobs:
           MODEL_PROVIDER: ${{ vars.MODEL_PROVIDER }}
           MODEL_NAME: ${{ vars.MODEL_NAME }}
           MODEL_BASE_URL: ${{ vars.MODEL_BASE_URL }}
-          MODEL_JSON_MODE: ${{ vars.MODEL_JSON_MODE }}
+          MODEL_JSON_MODE: ${{ vars.MODEL_JSON_MODE || 'none' }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           EXPORT_LIVE_TRANSCRIPT: '0'
         run: npm run lab -- --live
