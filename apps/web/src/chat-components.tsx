@@ -47,7 +47,7 @@ export function MessageRow({ message, parent, grouped = false, replies = 0, repl
     id={timeline ? `message-${message.id}` : undefined} data-message-id={message.id} data-author={message.authorId ?? 'human'} aria-label={`${message.authorName} ${timeLabel(message.createdAt)}`}>
     <div className="message-avatar">{!grouped ? <Avatar id={message.characterId ?? 'human'} name={message.authorName} /> : <time className="grouped-time">{timeLabel(message.createdAt)}</time>}</div>
     <div className="message-content">{!grouped && <div className="message-byline"><strong>{message.authorName}</strong>{message.authorId && <span className="agent-tag">Agent</span>}<time dateTime={new Date(message.createdAt).toISOString()} title={new Date(message.createdAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}>{timeLabel(message.createdAt)}</time></div>}
-      {message.replyTo && <button className="reply-preview" disabled={!parent || !jump} onClick={() => jump?.(message.replyTo!)}><Icon name="reply" /><span>{parent ? `${parent.authorName}：${preview(parent)}` : '表示範囲より前の発言への返信'}</span></button>}
+      {message.replyTo && timeline && <button className="reply-preview" disabled={!parent || !jump} onClick={() => jump?.(message.replyTo!)}><Icon name="reply" /><span>{parent ? `${parent.authorName}：${preview(parent)}` : '表示範囲より前の発言への返信'}</span></button>}
       <p className={message.deleted ? 'deleted-text' : ''}>{message.deleted ? '（削除済み）' : message.text}</p>
       {replies > 0 && <button className="reply-count" onClick={reply}>{replies} 件の返信<span>返信を表示 →</span></button>}
     </div>

@@ -5,7 +5,7 @@ const headers = { authorization: `Bearer ${adminToken}` };
 async function login(page: Page, token = adminToken) {
   await page.goto('/'); await page.getByLabel('ログイントークン').fill(token);
   await page.getByRole('button', { name: 'ログイン', exact: true }).click();
-  await expect(page.getByRole('navigation', { name: 'セッション一覧' })).toBeAttached();
+  await expect(page.locator('.workspace-role')).toHaveText(token === viewerToken ? '閲覧者' : '管理者');
 }
 async function create(page: Page, title: string) {
   await page.getByRole('button', { name: '新しいセッション', exact: true }).first().click();
@@ -34,6 +34,7 @@ const input = (page: Page) => page.locator('.composer-dock').getByLabel('発言'
 const send = (page: Page) => page.locator('.composer-dock').getByRole('button', { name: '送信', exact: true });
 
 test('real app UI: session lifecycle, independent mock replies, reconnection and escaped text', async ({ page, context }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
   await login(page); await create(page, 'E2E 自由会話');
   await expect(page.getByText('MOCK · 模擬応答')).toBeVisible();
   await input(page).fill('雨の日の過ごし方について話してください'); await send(page).click();
@@ -117,6 +118,8 @@ test('mobile chat: drawer navigation, public replies and no horizontal overflow'
   await thread.getByLabel('スレッドへ返信', { exact: true }).fill('狭い画面からの返信');
   await thread.getByRole('button', { name: '返信を送信' }).click();
   await expect(thread.locator('article').last()).toContainText('狭い画面からの返信');
+  await expect(thread.getByText('表示範囲より前の発言への返信')).toHaveCount(0);
+  await page.screenshot({ path: 'artifacts/chat-session-mobile-thread.png', fullPage: true });
   await page.getByRole('button', { name: 'パネルを閉じる' }).click();
   await page.screenshot({ path: 'artifacts/chat-session-mobile.png', fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
