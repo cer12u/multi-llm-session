@@ -2,7 +2,7 @@ import {expect,it} from 'vitest';
 import {createServer} from 'node:http';
 import {randomUUID} from 'node:crypto';
 import {fixture} from './helpers.js';
-import {ModelProfileSchema} from '../packages/contracts/index.js';
+import {ModelProfileSchema, type ModelProfile} from '../packages/contracts/index.js';
 import {buildServer} from '../apps/core/server.js';
 import {CoreClient,WorkerRuntime} from '../apps/agent-worker/runtime.js';
 
@@ -10,7 +10,7 @@ it('routes three workers through three actual local HTTP endpoints with separate
   const f=fixture(),servers:ReturnType<typeof createServer>[]=[],received:{model:string;authorization:string|undefined;system:string;path:string|undefined}[]=[];
   const app=buildServer(f.service,{timers:false});
   try{
-    const profiles=[];
+    const profiles:ModelProfile[]=[];
     for(let i=0;i<3;i++){
       const server=createServer(async(req,res)=>{
         let raw='';for await(const chunk of req)raw+=String(chunk);const body=JSON.parse(raw);
