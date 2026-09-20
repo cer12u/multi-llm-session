@@ -1,0 +1,63 @@
+name: multi-llm-session
+x-runtime: &runtime
+  image: multi-llm-session:ci
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+services:
+  core:
+    <<: *runtime
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      APP_BIND: 0.0.0.0
+      PORT: '3000'
+      PUBLIC_ORIGIN: http://127.0.0.1:3000
+      DB_PATH: /data/conversation.sqlite
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Run node deploy/init-env.mjs}
+      WORKER_A_TOKEN: ${WORKER_A_TOKEN:?Required}
+      WORKER_B_TOKEN: ${WORKER_B_TOKEN:?Required}
+      WORKER_C_TOKEN: ${WORKER_C_TOKEN:?Required}
+      ALLOW_LIVE_MODELS: '0'
+    ports: [127.0.0.1:3000:3000]
+    volumes: [session-data:/data]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  agent-a:
+    <<: *runtime
+    command: [node, dist/apps/agent-worker/main.js]
+    environment:
+      CORE_URL: http://core:3000
+      WORKER_TOKEN: ${WORKER_A_TOKEN:?Required}
+      ALLOW_LIVE_MODELS: '0'
+    depends_on:
+      core:
+        condition: service_healthy
+  agent-b:
+    <<: *runtime
+    command: [node, dist/apps/agent-worker/main.js]
+    environment:
+      CORE_URL: http://core:3000
+      WORKER_TOKEN: ${WORKER_B_TOKEN:?Required}
+      ALLOW_LIVE_MODELS: '0'
+    depends_on:
+      core:
+        condition: service_healthy
+  agent-c:
+    <<: *runtime
+    command: [node, dist/apps/agent-worker/main.js]
+    environment:
+      CORE_URL: http://core:3000
+      WORKER_TOKEN: ${WORKER_C_TOKEN:?Required}
+      ALLOW_LIVE_MODELS: '0'
+    depends_on:
+      core:
+        condition: service_healthy
+volumes:
+  session-data:
