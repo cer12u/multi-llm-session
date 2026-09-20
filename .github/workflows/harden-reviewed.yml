@@ -1,0 +1,29 @@
+name: Apply reviewed session hardening (one time)
+on:
+  push:
+    branches: [feat/session-runtime]
+    paths: [tools/harden-reviewed.mjs, .github/workflows/harden-reviewed.yml]
+permissions:
+  contents: write
+concurrency:
+  group: apply-reviewed-session-fixes
+  cancel-in-progress: false
+jobs:
+  apply:
+    if: github.repository == 'cer12u/multi-llm-session' && github.ref == 'refs/heads/feat/session-runtime'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: Apply exact reviewed changes then remove this workflow
+        run: |
+          node tools/harden-reviewed.mjs
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- apps/core/server.ts apps/web/src/main.tsx .github/workflows/ci.yml .github/workflows/live-eval.yml tests/e2e/session.spec.ts tools/harden-reviewed.mjs .github/workflows/harden-reviewed.yml
+          git commit -m 'fix: revoke streaming sessions, resync clients and verify container conversations'
+          git push origin HEAD:feat/session-runtime
