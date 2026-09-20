@@ -13,12 +13,12 @@ export function Icon({ name }: { name: 'menu' | 'plus' | 'search' | 'close' | 's
 export function Avatar({ id, name, small = false }: { id: string; name: string; small?: boolean }) {
   return <span aria-hidden="true" className={`avatar ${avatarTone(id)}${small ? ' small' : ''}`}>{initial(name)}</span>;
 }
-export function Dialog({ title, children, close }: { title: string; children: React.ReactNode; close: () => void }) {
+export function Dialog({ title, children, close, error }: { title: string; children: React.ReactNode; close: () => void; error?: string }) {
   const ref = useRef<HTMLDialogElement>(null), label = useId();
   useEffect(() => { const dialog = ref.current!; dialog.showModal(); return () => { dialog.close(); }; }, []);
   return <dialog ref={ref} className="modal" aria-labelledby={label} onCancel={event => { event.preventDefault(); close(); }}>
     <div className="modal-heading"><h2 id={label}>{title}</h2><button className="icon-button" aria-label="閉じる" onClick={close}><Icon name="close" /></button></div>
-    <div className="modal-body">{children}</div>
+    <div className="modal-body">{error && <p className="error-inline" role="alert">{error}</p>}{children}</div>
   </dialog>;
 }
 export type Draft = { text: string; addressedTo: string };
