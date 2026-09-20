@@ -1,0 +1,47 @@
+name: Explicit live model evaluation
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_billable_calls:
+        description: 'Authorize one bounded live experiment (up to 120 calls / 30 posts / 15 minutes)'
+        type: boolean
+        required: true
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: live-model-evaluation
+  cancel-in-progress: false
+jobs:
+  evaluate:
+    if: github.ref == 'refs/heads/main' && inputs.confirm_billable_calls && vars.ENABLE_LIVE_EVAL == 'true'
+    environment: live-evaluation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run check
+      - name: Run one bounded session against explicitly configured API
+        env:
+          ALLOW_LIVE_MODELS: '1'
+          MODEL_PROVIDER: ${{ vars.MODEL_PROVIDER }}
+          MODEL_NAME: ${{ vars.MODEL_NAME }}
+          MODEL_BASE_URL: ${{ vars.MODEL_BASE_URL }}
+          MODEL_JSON_MODE: ${{ vars.MODEL_JSON_MODE }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          EXPORT_LIVE_TRANSCRIPT: '0'
+        run: npm run lab -- --live
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: live-metrics-${{ github.run_id }}
+          path: artifacts/lab/*metrics.json
+          retention-days: 7
+          if-no-files-found: warn

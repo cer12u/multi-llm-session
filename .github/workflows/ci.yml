@@ -1,7 +1,7 @@
 name: Session application CI
 on:
   push:
-    branches: [main, feat/session-runtime]
+    branches: [main]
   pull_request:
     branches: [main]
 permissions:
@@ -12,7 +12,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -23,6 +23,52 @@ jobs:
           package-manager-cache: false
       - run: npm ci
       - run: npm run typecheck
+      - name: Unit, transaction, recovery, privacy and HTTP tests
+        run: npm test
       - run: npm run build
-      - name: Record validation scope
-        run: echo 'Compilation and production build only; behavioral tests are being added separately.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Three, five and eight independent worker processes
+        run: npm run lab
+      - name: Install the locked Chromium browser
+        run: npx playwright install --with-deps chromium
+      - name: Browser session lifecycle and reconnection
+        run: npm run test:e2e
+      - name: Export reproducible source and test scope
+        if: always()
+        run: |
+          mkdir -p artifacts
+          git archive --format=tar HEAD | gzip > artifacts/source.tar.gz
+          node -e "require('fs').writeFileSync('artifacts/commit.json', JSON.stringify({sha:process.env.GITHUB_SHA, mode:'mock', liveCalls:false},null,2))"
+          echo 'Validation uses synthetic characters and mock models only; it is not a real LLM quality evaluation.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: session-verification-${{ github.run_id }}
+          path: |
+            artifacts/
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: warn
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build the non-root application image
+        run: docker build -f deploy/Dockerfile -t multi-llm-session:ci .
+      - name: Validate Compose and boot an isolated mock cluster
+        run: |
+          node deploy/init-env.mjs
+          docker compose --env-file .env -f deploy/compose.yaml config --quiet
+          docker compose --env-file .env -f deploy/compose.yaml up -d --no-build
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:3000/healthz; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3000/healthz
+          docker compose --env-file .env -f deploy/compose.yaml ps
+      - name: Stop test containers
+        if: always()
+        run: docker compose --env-file .env -f deploy/compose.yaml down --volumes
