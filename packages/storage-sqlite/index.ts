@@ -42,8 +42,8 @@ CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL, lifecycle TEXT N
 CREATE TABLE agent_instances(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), slot TEXT NOT NULL REFERENCES workers(slot),
  character_json TEXT NOT NULL, profile_json TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
  processed_revision INTEGER NOT NULL DEFAULT 0, dirty_revision INTEGER NOT NULL DEFAULT 0, wake_seq INTEGER NOT NULL DEFAULT 0,
- pending_since INTEGER, due_at INTEGER, trigger TEXT NOT NULL DEFAULT 'START',
- processed_wake INTEGER NOT NULL DEFAULT 0, idle_checked INTEGER NOT NULL DEFAULT -1, next_self_at INTEGER NOT NULL, last_post_at INTEGER NOT NULL DEFAULT 0,
+ processed_wake INTEGER NOT NULL DEFAULT 0, pending_since INTEGER, due_at INTEGER, trigger TEXT NOT NULL DEFAULT 'START',
+ idle_checked INTEGER NOT NULL DEFAULT -1, next_self_at INTEGER NOT NULL, last_post_at INTEGER NOT NULL DEFAULT 0,
  error_count INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'listening', memory_revision INTEGER NOT NULL DEFAULT 0,
  deferral_json TEXT, UNIQUE(session_id,slot));
 CREATE TABLE candidates(id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agent_instances(id), session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -92,7 +92,7 @@ export class Store {
     this.db = new Database(path);
     try {
       const version = this.db.pragma('user_version', { simple: true }) as number;
-      if(version===0&&this.get("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1"))throw new Error('INVALID_APPLICATION_DATABASE');
+      if(version===0&&this.get("SELECT name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT 1"))throw new Error('INVALID_APPLICATION_DATABASE');
       if(version>CURRENT_SCHEMA_VERSION)throw new Error('Unsupported database schema: '+version);
       this.sqliteVersion = this.get<{version:string}>('SELECT sqlite_version() AS version')!.version;
       const [major, minor, patch] = this.sqliteVersion.split('.').map(Number);
