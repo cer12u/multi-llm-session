@@ -12,6 +12,7 @@ export class ArchiveSession {
   private initialized=false;
   private observedRevision=0;
   private revision=0;
+  private historyGeneration=0;
   private searchGeneration=0;
   private threadGeneration=0;
   private olderPromise:Promise<void>|null=null;
@@ -89,21 +90,37 @@ export class ArchiveSession {
     })().finally(()=>{this.repairPromise=null;});return this.repairPromise;
   }
   async resynchronize():Promise<void>{
-    this.historyError='';this.notify();
-    await this.revalidateKnown();await this.synchronize(await this.read<Snapshot>(this.url('snapshot')));
+    const generation=++this.historyGeneration, first=this.messages[0]?.sequence;
+    this.historyBusy=true;this.historyError='';this.notify();
+    try {
+      const snapshot=await this.read<Snapshot>(this.url('snapshot'));
+      if(!this.alive||generation!==this.historyGeneration)return;
+      this.historyCursor=snapshot.historyCursor;this.merge(snapshot.messages,true);
+      // Re-seed an invalid cursor from the authoritative head, preserving the loaded reading extent.
+      while(this.historyCursor&&first!==undefined&&this.alive) {
+        const cursor=this.historyCursor;
+        const page=await this.read<Page<PublicMessage>>(this.url('history?limit=100&cursor='+encodeURIComponent(cursor)));
+        if(!this.alive||generation!==this.historyGeneration)return;
+        if(page.nextCursor===cursor)throw new Error('PAGE_CURSOR_STALLED');
+        this.merge(page.items,true);this.historyCursor=page.nextCursor;this.notify();
+        if(!page.items.length||page.items[0].sequence<=first)break;
+      }
+      await this.revalidateKnown();await this.synchronize(snapshot);
+    }catch(error){if(this.alive&&generation===this.historyGeneration){this.historyError=error instanceof Error?error.message:'履歴を再同期できませんでした。';throw error;}}
+    finally{if(generation===this.historyGeneration){this.historyBusy=false;this.notify();}}
   }
   loadOlder():Promise<void>{
     if(this.olderPromise)return this.olderPromise;
     if(!this.historyCursor||!this.alive)return Promise.resolve();
-    const cursor=this.historyCursor;this.historyBusy=true;this.historyError='';this.notify();
+    const cursor=this.historyCursor,generation=this.historyGeneration;this.historyBusy=true;this.historyError='';this.notify();
     this.olderPromise=(async()=>{
       try{
         const page=await this.read<Page<PublicMessage>>(this.url('history?limit=100&cursor='+encodeURIComponent(cursor)));
-        if(!this.alive)return;
+        if(!this.alive||generation!==this.historyGeneration)return;
         if(page.nextCursor===cursor)throw new Error('PAGE_CURSOR_STALLED');
         this.merge(page.items,true);this.historyCursor=page.nextCursor;
-      }catch(error){if(this.alive){this.historyError=error instanceof Error?error.message:'以前の発言を取得できませんでした。';throw error;}}
-      finally{this.historyBusy=false;this.olderPromise=null;this.notify();}
+      }catch(error){if(this.alive&&generation===this.historyGeneration){this.historyError=error instanceof Error?error.message:'以前の発言を取得できませんでした。';throw error;}}
+      finally{if(generation===this.historyGeneration)this.historyBusy=false;this.olderPromise=null;this.notify();}
     })();return this.olderPromise;
   }
   changeQuery(){this.searchGeneration++;this.searchBusy=false;this.searchCursor=null;this.searchError='';this.searchIds=[];this.searchStarted=false;this.notify();}
@@ -124,7 +141,7 @@ export class ArchiveSession {
   async openThread(id:string,more=false):Promise<void>{
     if(!this.alive||more&&(!this.threadCursor||this.threadBusy))return;
     const generation=++this.threadGeneration,cursor=more?this.threadCursor:null;
-    if(!more){this.threadIds.clear();this.threadRoot=null;}
+    if(!more){this.threadIds.clear();this.threadRoot=null;this.threadCursor=null;}
     this.threadBusy=true;this.threadError='';this.notify();
     try{
       const page=await this.read<Page<PublicMessage>&{rootId:string}>(this.url('threads/'+encodeURIComponent(id)+'?limit=100'+(cursor?'&cursor='+encodeURIComponent(cursor):'')));
@@ -140,5 +157,5 @@ export class ArchiveSession {
     while(this.alive&&!this.historyIds.has(id)&&this.historyCursor)await this.loadOlder();
     this.notify();return this.alive&&this.historyIds.has(id);
   }
-  dispose(){this.alive=false;this.searchGeneration++;this.threadGeneration++;this.records.clear();this.historyIds.clear();this.searchIds=[];this.threadIds.clear();}
+  dispose(){this.alive=false;this.historyGeneration++;this.searchGeneration++;this.threadGeneration++;this.records.clear();this.historyIds.clear();this.searchIds=[];this.threadIds.clear();}
 }
