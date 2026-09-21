@@ -9,6 +9,7 @@ export class ArchiveSession {
   private searchIds:string[]=[];
   private threadIds=new Set<string>();
   private alive=true;
+  private notificationBatch=0;
   private initialized=false;
   private observedRevision=0;
   private revision=0;
@@ -32,7 +33,7 @@ export class ArchiveSession {
   threadError='';
   threadRoot:string|null=null;
   constructor(readonly sessionId:string,private readonly read:ArchiveRead,private readonly changed:()=>void) {}
-  private notify(){if(this.alive)this.changed();}
+  private notify(){if(this.alive&&this.notificationBatch===0)this.changed();}
   private url(path:string){return `/v1/sessions/${encodeURIComponent(this.sessionId)}/${path}`;}
   private merge(messages:PublicMessage[],history=false){
     for(const message of messages){
@@ -64,7 +65,6 @@ export class ArchiveSession {
     if(this.threadRoot)for(const m of snapshot.messages)if(m.threadRootId===this.threadRoot)this.threadIds.add(m.id);
     this.notify();
     try{
-      // A reconnect may have skipped more than a whole snapshot; bridge, rather than leave a hidden hole.
       let cursor=snapshot.historyCursor;
       if(previousHigh&&snapshot.messages.length&&(snapshot.messages[0].sequence>previousHigh+1)){
         while(cursor&&this.alive){
@@ -96,7 +96,6 @@ export class ArchiveSession {
       const snapshot=await this.read<Snapshot>(this.url('snapshot'));
       if(!this.alive||generation!==this.historyGeneration)return;
       this.historyCursor=snapshot.historyCursor;this.merge(snapshot.messages,true);
-      // Re-seed an invalid cursor from the authoritative head, preserving the loaded reading extent.
       while(this.historyCursor&&first!==undefined&&this.alive) {
         const cursor=this.historyCursor;
         const page=await this.read<Page<PublicMessage>>(this.url('history?limit=100&cursor='+encodeURIComponent(cursor)));
@@ -151,11 +150,14 @@ export class ArchiveSession {
     finally{if(generation===this.threadGeneration){this.threadBusy=false;this.notify();}}
   }
   async locate(id:string):Promise<boolean>{
-    // Lookup accepts tombstones as well as live originals and preserves same-session ownership.
-    const originals=await this.read<PublicMessage[]>(this.url('messages/lookup'),{ids:[id]});
-    if(!this.alive)return false;const target=originals[0];if(!target)return false;this.merge(originals);
-    while(this.alive&&!this.historyIds.has(id)&&this.historyCursor)await this.loadOlder();
-    this.notify();return this.alive&&this.historyIds.has(id);
+    // Batch deep-link paging: render the final range once, not a growing thousand-row tree after every page.
+    this.historyBusy=true;this.notify();this.notificationBatch++;
+    try {
+      const originals=await this.read<PublicMessage[]>(this.url('messages/lookup'),{ids:[id]});
+      if(!this.alive)return false;const target=originals[0];if(!target)return false;this.merge(originals);
+      while(this.alive&&!this.historyIds.has(id)&&this.historyCursor)await this.loadOlder();
+      return this.alive&&this.historyIds.has(id);
+    } finally { this.notificationBatch--;this.historyBusy=false;this.notify(); }
   }
   dispose(){this.alive=false;this.historyGeneration++;this.searchGeneration++;this.threadGeneration++;this.records.clear();this.historyIds.clear();this.searchIds=[];this.threadIds.clear();}
 }
