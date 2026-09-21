@@ -27,7 +27,12 @@ test('R9-CHAR-004: real form creates, edits, exports and imports exact versions 
   await page.getByRole('button', { name: '新しいセッション', exact: true }).first().click();
   const create = page.getByRole('dialog', { name: '新しいセッション', exact: true });
   await create.getByLabel('セッション名').fill(title);
-  await create.getByLabel('キャラクター', { exact: true }).first().selectOption(id);
+  // The enclosing label includes option text. Use the first participant's actual combobox, not a nonexistent exact label.
+  const character = create.locator('.member-fields fieldset').first().getByRole('combobox').first();
+  await expect(character).toBeVisible();
+  await expect(character.locator(`option[value="${id}"]`)).toHaveCount(1);
+  await character.selectOption(id);
+  await expect(character).toHaveValue(id);
   await create.getByRole('button', { name: 'セッションを作成', exact: true }).click();
   await expect(page.locator('.channel-title h1')).toContainText(title);
   dialog = await manager(page);
@@ -78,6 +83,7 @@ test('R9-CHAR-005: mobile editor uses real routes; viewer has no private editor 
   await dialog.getByRole('button', { name: '閉じる', exact: true }).click();
   await page.getByRole('button', { name: 'セッション一覧を開く' }).click();
   await page.getByRole('button', { name: 'ログアウト', exact: true }).click();
+  await expect(page.getByLabel('ログイントークン')).toBeVisible();
   await login(page, viewer);
   await page.getByRole('button', { name: 'セッション一覧を開く' }).click();
   await expect(page.getByRole('button', { name: 'キャラクターを管理', exact: true })).toHaveCount(0);
