@@ -10,7 +10,7 @@ export const PresentationMessageSchema = z.object({
   characterId: z.string().max(64).nullable(), characterVersion: Counter.nullable(),
   text: z.string().max(8000), deleted: z.boolean(), createdAt: Counter,
   replyTo: Uuid.nullable(), threadRootId: Uuid,
-}).transform(message => ({ ...message, text: message.deleted ? '' : message.text }));
+});
 export const PresentationEventSchema = z.object({
   schemaVersion: z.literal(1).default(1), id: z.string().max(100), sessionId: Uuid,
   kind: z.string().regex(/^[a-z][a-z0-9_.-]{0,79}$/), revision: Counter, createdAt: Counter,
@@ -31,7 +31,11 @@ export function cursorSequence(cursor: string, sessionId: string): number | null
 }
 export function publicPresentationEvent(input: unknown): PresentationEvent | null {
   const parsed = PresentationEventSchema.safeParse(input);
-  return parsed.success ? parsed.data : null;
+  if (!parsed.success) return null;
+  const event = parsed.data;
+  // Runtime semantic redaction stays separate so the structural contract can be exported as JSON Schema.
+  if (event.message?.deleted) event.message.text = '';
+  return event;
 }
 
 /** One session/connection only. Text is primary; an optional enhancement can never acknowledge a Core command. */
