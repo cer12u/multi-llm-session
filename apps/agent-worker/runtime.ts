@@ -58,7 +58,6 @@ export class WorkerRuntime {
         const lookup=LookupSchema.safeParse(parsed);
         if(lookup.success) {
           if(lookups>=2)throw new ModelError('FORMAT_ERROR');
-          // Core performs ownership checks and stores exactly what was retrieved with this run.
           context=await this.client.request<Context>(base+'/lookup',{...auth,requestKey:run.id+':lookup:'+lookups,requests:lookup.data.requests},combined);
           lookups++;stage='lookup';invalid=undefined;continue;
         }
@@ -66,10 +65,12 @@ export class WorkerRuntime {
       }
       throw new ModelError('FORMAT_ERROR');
     } catch(e) {
-      const code:ModelErrorCode=e instanceof ModelError?e.code:e instanceof CoreError&&e.status===422?'FORMAT_ERROR':combined.aborted?'CANCELLED':'API_ERROR';
+      const stale=e instanceof CoreError&&['STALE_RUN','STALE_WORKER','BUDGET_STOPPED'].includes(e.code);
+      const invalidResult=e instanceof CoreError&&(e.status===422||(e.status===409&&!stale));
+      const code:ModelErrorCode=e instanceof ModelError?e.code:invalidResult?'FORMAT_ERROR':combined.aborted?'CANCELLED':'API_ERROR';
       if(callId) await this.client.request(base+'/calls/'+callId,{token:run.token,usage:{inputTokens:null,outputTokens:null} satisfies Usage,error:code,retryAfterMs:e instanceof ModelError?e.retryAfterMs:0}).catch(()=>{});
-      // A stale generation is an expected cancellation, not a fresh model failure.
-      if(!(e instanceof CoreError&&e.status===409)) await this.client.request(base+'/failure',{...auth,code}).catch(()=>{});
+      // Stale generations are already fenced. Other rejected results must not leave a reusable active run.
+      if(!stale) await this.client.request(base+'/failure',{...auth,code}).catch(()=>{});
       return true;
     } finally { clearInterval(heartbeat); this.controller=null; }
   }

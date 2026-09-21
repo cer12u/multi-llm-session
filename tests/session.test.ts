@@ -78,9 +78,13 @@ describe('persistent session invariants',()=>{
     const f=setup();f.start();const run=required(f.claim());f.finish(run,{decision:'DEFER',reason:'返答待ち',defer:{kind:'new_message',afterMs:10000,agentId:null}});
     expect(f.claim()).toBeNull();const m=f.say('新着で再開');const next=required(f.claim());expect(next.context.messages.map(x=>x.id)).toContain(m.id);
   });
-  it('keeps a timed deferral despite unrelated messages then wakes at its deadline',()=>{
+  it('keeps a timed deferral while observing unrelated messages then decides at its deadline',()=>{
     const f=setup();f.start();f.finish(required(f.claim()),{decision:'DEFER',reason:'待つ',defer:{kind:'time',afterMs:5000,agentId:null}});
-    f.say();expect(f.claim()).toBeNull();f.advance(5000);expect(f.claim()).not.toBeNull();
+    const waiting=f.service.agents(f.id)[0].deferral_json;
+    f.say();const observation=required(f.claim());expect(observation.kind).toBe('observe');
+    f.finish(observation,{decision:'ABSTAIN',reason:'聞くだけ'});
+    expect(f.service.agents(f.id)[0].deferral_json).toBe(waiting);expect(f.service.session(f.id).bot_count).toBe(0);
+    expect(f.claim()).toBeNull();f.advance(5000);expect(required(f.claim()).kind).toBe('decide');
   });
   it('enters QUIET and fires only one idle check per silence epoch',()=>{
     const f=setup();f.start();for(const slot of Object.keys(f.epochs))f.finish(required(f.claim(slot)),{decision:'ABSTAIN',reason:'聞く'});

@@ -1,5 +1,5 @@
 import { LocalMemoryRetriever, recallRequest, type MemoryRetriever } from './recall.js';
-import { ensure, InputWindowSchema, type Context, type InputProgress, type InputWindow, type RunKind, type Settings } from '../contracts/index.js';
+import { AppError, ensure, InputWindowSchema, type Context, type InputProgress, type InputWindow, type RunKind, type Settings } from '../contracts/index.js';
 import type { Store, AgentRow, MessageRow, RunRow } from '../storage-sqlite/index.js';
 
 type CursorRow = { agent_id: string; observed_input: number; memory_input: number; memory_target: number; foreground_runs: number };
@@ -73,25 +73,25 @@ export class AgentInputs {
         eventVersion: row.version, version, superseded: version !== row.version, excerpt: !!source && source.text.length > 1600 });
       if (!fits()) {
         context.delivery!.entries.pop(); context.messages.length = previousMessages; context.sources.length = previousSources;
-        // A too-large first item must be diagnosed, never skipped or acknowledged with an empty range.
         ensure(context.delivery!.entries.length > 0, 422, 'CONTEXT_LIMIT'); break;
       }
       context.delivery!.throughInput = row.id;
     }
     context.delivery!.complete = context.delivery!.throughInput >= target;
+    // Review is not complete while mandatory observation input remains unprocessed.
+    if (context.coverage) context.coverage.complete &&= context.delivery!.complete;
     const mandatoryMessages = context.messages.length;
     if (!memory && kind !== 'observe') {
-      // Current context supports the decision, while delivery.entries is the separate exact unread prefix.
       for (const m of originalMessages) {
         if (context.messages.some(v => v.id === m.id)) { context.selection!.omittedRecent--; continue; }
         context.messages.push(m);
         if (!fits()) context.messages.pop(); else context.selection!.omittedRecent--;
       }
+      context.messages.sort((a, b) => a.sequence - b.sequence);
       const recalled = this.retriever.search(recallRequest(context, agent.session_id, agent.id));
       context.recall = { algorithm: 'local-word-evidence-v1', selected: [], omittedForBudget: [] };
       context.selection!.omittedMemories = recalled.length;
       for (const candidate of recalled) {
-        // Give the model originals for exact quotation; a summary alone is not a quote source.
         const evidence = { request: { kind: 'memories' as const, query: 'automatic related memory', cursor: null },
           messages: candidate.originals.map(this.project), memories: [candidate.note], nextCursor: null };
         context.memories.push(candidate.note); context.retrieved ??= []; context.retrieved.push(evidence);
@@ -120,7 +120,7 @@ export class AgentInputs {
       run.session_id, window.fromInput, window.throughInput);
     ensure(expected.length === window.entries.length && expected.every((r, i) => r.id === window.entries[i].inputId &&
       r.kind === window.entries[i].kind && r.entity_id === window.entries[i].id && r.version === window.entries[i].eventVersion), 409, 'INPUT_COVERAGE_MISMATCH');
-    ensure(window.throughInput <= window.targetInput && window.targetInput <= this.high(run.session_id) &&
+    ensure(window.throughInput >= window.fromInput && window.throughInput <= window.targetInput && window.targetInput <= this.high(run.session_id) &&
       window.complete === (window.throughInput >= window.targetInput), 409, 'INPUT_COVERAGE_MISMATCH');
     for (const entry of window.entries) {
       const current = entry.kind === 'message'
@@ -129,6 +129,17 @@ export class AgentInputs {
       ensure(current?.version === entry.version, 409, 'STALE_INPUT_EVIDENCE');
     }
     return window;
+  }
+
+  reusable(run: RunRow): boolean {
+    const captured = (JSON.parse(run.context_json) as Context).self.privateState;
+    const current = this.store.get<{version:number}>('SELECT version FROM agent_private_states WHERE agent_id=?', run.agent_id);
+    if (!captured || captured.version !== (current?.version ?? 0)) return false;
+    try { this.validate(run); return true; }
+    catch (error) {
+      if (error instanceof AppError && ['STALE_INPUT_CURSOR','STALE_INPUT_EVIDENCE'].includes(error.code)) return false;
+      throw error;
+    }
   }
 
   complete(run: RunRow): void {
