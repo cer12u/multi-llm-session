@@ -14,7 +14,7 @@ export function parseOutput(kind: RunKind, value: string, wrapped=false): unknow
   try { const data:unknown=JSON.parse(text); return WireOutputSchemas[kind].parse(wrapped?(data as {result?:unknown})?.result:data); }
   catch { throw new ModelError('FORMAT_ERROR'); }
 }
-const schemas = new Map<RunKind, ReturnType<typeof z.toJSONSchema>>();
+const schemas = new Map<RunKind, object>();
 function outputSchema(kind:RunKind) {
   let schema=schemas.get(kind);
   if(!schema){schema=z.toJSONSchema(WireOutputSchemas[kind]);schemas.set(kind,schema);}

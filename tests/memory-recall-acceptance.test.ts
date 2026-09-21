@@ -12,7 +12,7 @@ it('R5-RECALL-020: old paraphrase, person and validity-time retrieval is measure
     const originals=Array.from({length:245},(_,i)=>f.say('保持する原文 '+i));
     const [a,b,c]=f.service.agents(f.id);let sequence=0;
     const day=Date.parse('2026-09-21T00:00:00Z');
-    function add(owner:string,text:string,meaning:MemoryMeaning|null,sourceIndex:number,status='ACTIVE'){
+    function add(owner:string,text:string,meaning:MemoryMeaning|null,sourceIndex:number,status='ACTIVE'):string{
       const id=randomUUID(),source=originals[sourceIndex];sequence++;
       f.store.run('INSERT INTO memories(id,agent_id,text,sources_json,created_at,sequence) VALUES(?,?,?,?,?,?)',id,owner,text,JSON.stringify([source.id]),f.now(),sequence);
       f.store.run('INSERT INTO memory_metadata(memory_id,status,meaning_json,evidence_json) VALUES(?,?,?,?)',id,status,meaning?JSON.stringify(meaning):null,JSON.stringify([{kind:'message',id:source.id,version:source.revision}]));
@@ -31,7 +31,7 @@ it('R5-RECALL-020: old paraphrase, person and validity-time retrieval is measure
     const foreign=add(b.id,'他者だけの面談の約束',meaning({aliases:['面談','アポイントメント']}),8);
     for(let i=0;i<30;i++)add(a.id,'関係のない献立 '+i,meaning({key:'料理'+i,value:'果物'}),220+i%20);
     const request=(text:string,extra:Partial<RecallRequest>={}):RecallRequest=>({sessionId:f.id,agentId:a.id,text,evidenceIds:[],limit:1,at:day+1000,...extra});
-    const cases=[
+    const cases:{name:string;request:RecallRequest;expected:string[]}[]=[
       {name:'paraphrase-outside-recent12',request:request('アポイントメント'),expected:[paraphrase]},
       {name:'person-reference',request:request('締切',{subjectIds:[b.id]}),expected:[person]},
       {name:'historic-date',request:request('旅先',{at:day-1000}),expected:[historic]},
