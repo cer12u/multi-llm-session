@@ -47,16 +47,16 @@ export function MessageRow({ message, parent, grouped = false, replies = 0, repl
     id={timeline ? `message-${message.id}` : undefined} data-message-id={message.id} data-author={message.authorId ?? 'human'} aria-label={`${message.authorName} ${timeLabel(message.createdAt)}`}>
     <div className="message-avatar">{!grouped ? <Avatar id={message.characterId ?? 'human'} name={message.authorName} /> : <time className="grouped-time">{timeLabel(message.createdAt)}</time>}</div>
     <div className="message-content">{!grouped && <div className="message-byline"><strong>{message.authorName}</strong>{message.authorId && <span className="agent-tag">Agent</span>}<time dateTime={new Date(message.createdAt).toISOString()} title={new Date(message.createdAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}>{timeLabel(message.createdAt)}</time></div>}
-      {message.replyTo && timeline && <button className="reply-preview" disabled={!parent || !jump} onClick={() => jump?.(message.replyTo!)}><Icon name="reply" /><span>{parent ? `${parent.authorName}：${preview(parent)}` : '表示範囲より前の発言への返信'}</span></button>}
+      {message.replyTo && timeline && <button className="reply-preview" disabled={!jump} onClick={() => jump?.(message.replyTo!)}><Icon name="reply" /><span>{parent ? `${parent.authorName}：${preview(parent)}` : '表示範囲より前の発言への返信'}</span></button>}
       <p className={message.deleted ? 'deleted-text' : ''}>{message.deleted ? '（削除済み）' : message.text}</p>
       {replies > 0 && <button className="reply-count" onClick={reply}>{replies} 件の返信<span>返信を表示 →</span></button>}
     </div>
     {(reply || remove) && <div className="message-actions">{reply && <button title="返信を表示・入力" aria-label="返信" onClick={reply}><Icon name="reply" /></button>}{remove && !message.deleted && <button className="delete-action" aria-label="発言を削除" onClick={remove}>削除</button>}</div>}
   </article>;
 }
-export type ScrollPosition = { top: number; atBottom: boolean };
-export function Timeline({ sessionId, title, messages, reply, remove, jumpId, positions }: {
-  sessionId: string; title: string; messages: PublicMessage[]; reply: (id: string) => void; remove?: (message: PublicMessage) => void; jumpId: string | null; positions: Map<string, ScrollPosition>;
+export type ScrollPosition = { top: number; atBottom: boolean; anchorId?: string; anchorOffset?: number };
+export function Timeline({ sessionId, title, messages, reply, remove, jumpId, positions, navigate }: {
+  sessionId: string; title: string; messages: PublicMessage[]; reply: (id: string) => void; remove?: (message: PublicMessage) => void; jumpId: string | null; positions: Map<string, ScrollPosition>; navigate?: (id: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null), atBottom = useRef(true), last = useRef<{ session: string; id?: string }>({ session: '' });
   const [newMessages, setNewMessages] = useState(0), [highlight, setHighlight] = useState<string | null>(null);
@@ -64,9 +64,19 @@ export function Timeline({ sessionId, title, messages, reply, remove, jumpId, po
   const replies = new Map<string, number>();
   for (const message of messages) if (message.replyTo) replies.set(message.replyTo, (replies.get(message.replyTo) ?? 0) + 1);
   function bottom() { const el = ref.current; if (!el) return; el.scrollTop = el.scrollHeight; atBottom.current = true; positions.set(sessionId, { top: el.scrollTop, atBottom: true }); setNewMessages(0); }
-  function jump(id: string) { const node = ref.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`); if (node) { node.scrollIntoView({ block: 'center', behavior: 'auto' }); setHighlight(id); } }
+  function jump(id: string) { const node = ref.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`); if (node) { node.scrollIntoView({ block: 'center', behavior: 'auto' }); setHighlight(id); } else navigate?.(id); }
+  function remember() {
+    const el=ref.current!; const edge=el.getBoundingClientRect().top;
+    const anchor=[...el.querySelectorAll<HTMLElement>('[data-message-id]')].find(node=>node.getBoundingClientRect().bottom>edge);
+    positions.set(sessionId,{top:el.scrollTop,atBottom:atBottom.current,anchorId:anchor?.dataset.messageId,anchorOffset:anchor?anchor.getBoundingClientRect().top-edge:undefined});
+  }
   useLayoutEffect(() => {
     const el = ref.current!;
+    const storedAnchor=positions.get(sessionId);
+    if(last.current.session===sessionId&&!atBottom.current&&storedAnchor?.anchorId) {
+      const node=el.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(storedAnchor.anchorId)}"]`);
+      if(node)el.scrollTop+=node.getBoundingClientRect().top-el.getBoundingClientRect().top-(storedAnchor.anchorOffset??0);
+    }
     if (last.current.session !== sessionId) {
       const stored = positions.get(sessionId); atBottom.current = stored?.atBottom ?? true;
       el.scrollTop = atBottom.current ? el.scrollHeight : stored?.top ?? 0;
@@ -75,16 +85,15 @@ export function Timeline({ sessionId, title, messages, reply, remove, jumpId, po
       if (atBottom.current) bottom();
       else { const index = messages.findIndex(message => message.id === last.current.id); setNewMessages(count => count + (index < 0 ? 1 : messages.length - index - 1)); }
     }
-    last.current = { session: sessionId, id: messages.at(-1)?.id };
+    last.current = { session: sessionId, id: messages.at(-1)?.id }; remember();
   }, [messages, sessionId]);
   useEffect(() => { if (jumpId) jump(jumpId); }, [jumpId]);
   useEffect(() => { if (!highlight) return; const timer = setTimeout(() => setHighlight(null), 1800); return () => clearTimeout(timer); }, [highlight]);
   return <div className="timeline-wrap"><div ref={ref} className="timeline" role="log" aria-label="会話履歴" aria-live="polite" aria-relevant="additions text" onScroll={() => {
     const el = ref.current!; atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    positions.set(sessionId, { top: el.scrollTop, atBottom: atBottom.current }); if (atBottom.current) setNewMessages(0);
+    remember(); if (atBottom.current) setNewMessages(0);
   }}>
     <section className="channel-intro"><span className="channel-hash">#</span><h2>{title}</h2><p>ここがこのセッションの会話スペースです。話題を送るか、Agentの会話を観察してください。</p></section>
-    {messages.length >= 200 && <p className="history-limit">直近200件を表示しています。以前の発言は検索で参照できます。</p>}
     {messages.map((message, index) => <React.Fragment key={message.id}>
       {(!index || dayKey(messages[index - 1].createdAt) !== dayKey(message.createdAt)) && <div className="day-divider"><span>{dayLabel(message.createdAt)}<small> JST</small></span></div>}
       {index > 0 && messages[index - 1].episode !== message.episode && <div className="episode-divider">会話を再開 · エピソード {message.episode}</div>}
