@@ -5,6 +5,8 @@ import type { InputWindow, InputProgress, InputSelection } from './input-window.
 export * from './input-window.js';
 import type { AgendaContext } from './agenda.js';
 export * from './agenda.js';
+import { ProviderCapabilitiesSchema } from './provider-capabilities.js';
+export * from './provider-capabilities.js';
 
 export const Id = z.string().uuid();
 export const Slug = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/);
@@ -25,7 +27,10 @@ export const ModelProfileSchema = z.object({
   failureThreshold: z.number().int().min(1).max(10).default(3),
   circuitCooldownMs: z.number().int().min(1000).max(3600000).default(60000),
   allowLocalHttp: z.boolean().default(false), authRequired: z.boolean().default(true),
-}).strict();
+  // No default: parsing a legacy immutable profile must not silently change its stored hash.
+  capabilities: ProviderCapabilitiesSchema.optional(),
+}).strict().refine(p=>!p.capabilities||p.capabilities.jsonModes.includes(p.jsonMode),'Selected JSON mode is not declared supported')
+  .refine(p=>!p.capabilities||p.provider==='mock'||(p.provider==='ollama')===(p.capabilities.outputTokenParameter==='num_predict'),'Token parameter does not match Provider API');
 export type ModelProfile = z.infer<typeof ModelProfileSchema>;
 
 export const SettingsSchema = z.object({
@@ -99,7 +104,7 @@ export const UsageSchema = z.object({
   inputTokens: z.number().int().nonnegative().nullable(), outputTokens: z.number().int().nonnegative().nullable(),
 }).strict();
 export type Usage = z.infer<typeof UsageSchema>;
-export const ErrorCodeSchema = z.enum(['API_ERROR', 'AUTH_ERROR', 'RATE_LIMIT', 'TIMEOUT', 'FORMAT_ERROR', 'CONTEXT_LIMIT', 'CANCELLED', 'CONFIG_ERROR']);
+export const ErrorCodeSchema = z.enum(['API_ERROR', 'AUTH_ERROR', 'RATE_LIMIT', 'TIMEOUT', 'FORMAT_ERROR', 'CONTEXT_LIMIT', 'CANCELLED', 'CONFIG_ERROR', 'OUTPUT_TRUNCATED', 'EMPTY_RESPONSE', 'OUTPUT_TOO_LARGE', 'RESPONSE_REFUSED', 'DELIVERY_UNKNOWN']);
 export type ModelErrorCode = z.infer<typeof ErrorCodeSchema>;
 export type RunKind = 'decide' | 'draft' | 'review' | 'memory' | 'observe';
 export const ObserveSchema = z.object({ decision: z.literal('ABSTAIN'), reason: z.string().max(160) }).strict();
