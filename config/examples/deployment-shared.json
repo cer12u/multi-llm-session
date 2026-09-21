@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "allowLive": true,
+  "profiles": [{"id":"shared","version":1,"provider":"ollama","model":"REPLACE_WITH_MODEL_ID","baseUrl":"https://ollama.example/api","apiKeyEnv":"LLM_API_KEY","jsonMode":"json","limitGroup":"shared-account","maxConcurrent":3}],
+  "workers": [{"id":"worker-a","characterId":"sora","profileId":"shared"},{"id":"worker-b","characterId":"nagi","profileId":"shared"},{"id":"worker-c","characterId":"rin","profileId":"shared"}],
+  "credentialFiles": {"LLM_API_KEY":"/absolute/private/path/model.key"}
+}
