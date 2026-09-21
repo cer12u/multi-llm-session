@@ -12,9 +12,9 @@ concurrency:
 jobs:
   verify:
     outputs:
-      diagnostic: ${{ steps.typecheck.outputs.diagnostic || steps.tests.outputs.diagnostic }}
+      diagnostic: ${{ steps.e2e.outputs.diagnostic || steps.browser.outputs.diagnostic || steps.lab.outputs.diagnostic || steps.schemas.outputs.diagnostic || steps.build.outputs.diagnostic || steps.tests.outputs.diagnostic || steps.typecheck.outputs.diagnostic || steps.install.outputs.diagnostic }}
       counts: ${{ steps.tests.outputs.counts }}
-      failures: ${{ steps.tests.outputs.failures || steps.typecheck.outputs.failures }}
+      failures: ${{ steps.e2e.outputs.failures || steps.browser.outputs.failures || steps.lab.outputs.failures || steps.schemas.outputs.failures || steps.build.outputs.failures || steps.tests.outputs.failures || steps.typecheck.outputs.failures || steps.install.outputs.failures || steps.tests.outputs.countsJson }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -25,22 +25,30 @@ jobs:
         with:
           node-version: '24.20.0'
           package-manager-cache: false
-      - run: npm ci
+      - name: Install locked dependencies
+        id: install
+        run: node deploy/ci-check.mjs install
       - name: TypeScript checking
         id: typecheck
         run: node deploy/ci-check.mjs typecheck
       - name: Unit, transaction, recovery, privacy and HTTP tests
         id: tests
         run: node deploy/ci-check.mjs tests
-      - run: npm run build
+      - name: Production build
+        id: build
+        run: node deploy/ci-check.mjs build
       - name: Export contract schemas
-        run: node dist/apps/cli/schema.js
+        id: schemas
+        run: node deploy/ci-check.mjs schemas
       - name: Three, five and eight independent worker processes
-        run: npm run lab
+        id: lab
+        run: node deploy/ci-check.mjs lab
       - name: Install the locked Chromium browser
-        run: npx playwright install --with-deps chromium
+        id: browser
+        run: node deploy/ci-check.mjs browser
       - name: Browser session lifecycle and reconnection
-        run: npm run test:e2e
+        id: e2e
+        run: node deploy/ci-check.mjs e2e
       - name: Export reproducible source and test scope
         if: always()
         run: |
@@ -65,7 +73,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        detail: ${{ fromJSON(needs.verify.outputs.failures || '["No unit result; inspect verify job"]') }}
+        detail: ${{ fromJSON(needs.verify.outputs.failures || '["No result; inspect verify job"]') }}
     name: "Diagnostic only — ${{ matrix.detail }}"
     runs-on: ubuntu-24.04
     timeout-minutes: 1
