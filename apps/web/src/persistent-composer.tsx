@@ -13,28 +13,34 @@ const descriptions:Record<string,string>={
   DRAFT_SCOPE_REVOKED:'別のタブでログアウトされました。再度ログインしてください。',
   DRAFT_STORAGE_FULL:'端末の保存容量が不足しています。本文をコピーして保管してください。未保存のまま送信しません。',
 };
-export function useDurableDrafts(scope:string|null,api:Api,revoked:()=>void):DraftController|null {
+export function useDurableDrafts(operator:boolean,api:Api,revoked:()=>void):DraftController|null {
   const value=useRef<DraftController|null>(null),apiRef=useRef(api),revokedRef=useRef(revoked);
   const [,update]=useState(0);apiRef.current=api;revokedRef.current=revoked;
   useEffect(()=>{
-    if(!scope){value.current=null;update(v=>v+1);return;}
+    if(!operator){value.current=null;update(v=>v+1);return;}
+    let closed=false;const store=new IndexedDraftStore();
     const channel=typeof BroadcastChannel==='undefined'?null:new BroadcastChannel('multi-llm-session-draft-events');
-    const controller=new DraftController(scope,new IndexedDraftStore(),(path,body,key)=>apiRef.current(path,body,key),()=>update(v=>v+1),signal=>channel?.postMessage(signal));
-    value.current=controller;update(v=>v+1);void controller.initialize();
-    if(channel)channel.onmessage=event=>{const signal=event.data;if(!signal||signal.scope!==scope||!['changed','clear'].includes(signal.kind))return;controller.receive(signal);if(signal.kind==='clear')revokedRef.current();};
-    return()=>{channel?.close();controller.dispose();if(value.current===controller)value.current=null;};
-  },[scope]);
-  return value.current?.scope===scope?value.current:null;
+    const create=(scope:string)=>new DraftController(scope,store,(path,body,key)=>apiRef.current(path,body,key),()=>update(v=>v+1),signal=>channel?.postMessage(signal));
+    void store.owner().then(async scope=>{
+      if(closed)return;const controller=create(scope);value.current=controller;update(v=>v+1);
+      if(channel)channel.onmessage=event=>{const signal=event.data;if(!signal||signal.scope!==scope||!['changed','clear'].includes(signal.kind))return;controller.receive(signal);if(signal.kind==='clear')revokedRef.current();};
+      await controller.initialize();
+    }).catch(error=>{
+      if(closed)return;const controller=create('0'.repeat(64));controller.error=error instanceof Error?error.message:'DRAFT_STORAGE_UNAVAILABLE';value.current=controller;update(v=>v+1);
+    });
+    return()=>{closed=true;channel?.close();value.current?.dispose();value.current=null;store.close();};
+  },[operator]);
+  return operator?value.current:null;
 }
 export function PersistentComposer({controller,draftKey,title,agents,thread=false,lockedReason,perform,afterSend}: {
   controller:DraftController|null;draftKey:string;title:string;agents:PublicAgent[];thread?:boolean;
   lockedReason?:string;perform:(operation:()=>Promise<void>)=>void;afterSend:()=>Promise<void>;
 }) {
   const state=controller?.status(draftKey),draft=controller?.draft(draftKey)??emptyDraft;
-  const blocked=!controller?.ready||!!lockedReason||!!state?.unknown||!!state?.conflict||!!state?.saving;
+  const blocked=!controller?.ready||!!lockedReason||!!state?.unknown||!!state?.conflict;
   const invoke=(operation:()=>Promise<void>)=>perform(async()=>{await operation();await afterSend();});
   const message=!controller?'端末保存を準備中です。':!controller.ready?'端末保存が利用できません。保存状態を確認できないため投稿を停止しています。'
-    :state?.conflict?descriptions.DRAFT_CONFLICT:state?.unknown?descriptions[state.error]??descriptions.DRAFT_RESULT_UNKNOWN
+    :state?.busy?'送信中です。内容とキーは端末に保存されています。':state?.conflict?descriptions.DRAFT_CONFLICT:state?.unknown?descriptions[state.error]??descriptions.DRAFT_RESULT_UNKNOWN
     :state?.saving?'端末に保存中です。':state?.error?descriptions[state.error]??'端末への保存に失敗しました。本文をコピーして保管してください。'
     :state?.outbox?.state==='confirmed'?'送信確認済み・下書きは端末に保存済みです。':'下書きは端末に保存済みです。';
   return <>

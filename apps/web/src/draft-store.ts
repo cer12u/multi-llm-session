@@ -41,6 +41,20 @@ export class IndexedDraftStore implements DraftStore {
       request.onsuccess=()=>{request.result.onversionchange=()=>request.result.close();resolve(request.result);};
     });
   }
+  /** The app has one operator principal per origin. This random tag is not an authentication token. */
+  async owner():Promise<string>{
+    const db=await this.database;
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('scopes','readwrite');let owner='';
+      const request=tx.objectStore('scopes').get('single-operator');
+      request.onsuccess=()=>{
+        owner=request.result?.namespace??[...crypto.getRandomValues(new Uint8Array(32))].map(n=>n.toString(16).padStart(2,'0')).join('');
+        if(!/^[a-f0-9]{64}$/.test(owner)){tx.abort();return;}
+        if(!request.result)tx.objectStore('scopes').put({scope:'single-operator',namespace:owner});
+      };
+      tx.oncomplete=()=>resolve(owner);tx.onerror=()=>reject(new Error('DRAFT_STORAGE_UNAVAILABLE'));tx.onabort=()=>reject(new Error('DRAFT_STORAGE_INVALID'));
+    });
+  }
   async load(scope:string){
     const db=await this.database;
     return new Promise<{generation:number;records:DraftRecord[]}>((resolve,reject)=>{
