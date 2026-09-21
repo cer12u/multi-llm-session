@@ -52,7 +52,10 @@ it('R2-STATE-016: three real WorkerRuntime→Core HTTP paths persist different s
     expect(f.service.session(f.id).call_count).toBe(6);
     expect(f.store.all('SELECT * FROM agent_state_updates')).toHaveLength(6);
     expect(JSON.stringify(f.service.exportSession(f.id))).not.toContain('だけの私有疑問');
-    const viewer = await app.inject({ method: 'GET', url: `/v1/sessions/${f.id}/snapshot`, headers: { authorization: 'Bearer ' + f.config.viewerToken } });
+    const headers = { host: new URL(f.config.publicOrigin).host, authorization: 'Bearer ' + f.config.viewerToken };
+    const denied = await app.inject({ method: 'GET', url: `/v1/sessions/${f.id}/snapshot`, headers: { ...headers, host: 'wrong-host.invalid' } });
+    expect(denied.statusCode).toBe(403); expect(denied.json()).toMatchObject({ code: 'INVALID_HOST' });
+    const viewer = await app.inject({ method: 'GET', url: `/v1/sessions/${f.id}/snapshot`, headers });
     expect(viewer.statusCode).toBe(200); expect(viewer.body).not.toContain('privateState'); expect(viewer.body).not.toContain('だけの私有疑問');
   } finally { await app.close(); f.close(); }
 }, 20000);
