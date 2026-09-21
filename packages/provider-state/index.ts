@@ -6,7 +6,6 @@ type Health = {scope:string;failures:number;open_until:number;blocked:number;las
 export function providerScope(profile: ModelProfile): string {
   if(profile.provider==='mock') return 'mock';
   if(profile.limitGroup) return 'group:'+profile.limitGroup;
-  // Key identifiers, not credentials. Different credential bindings do not share an accidental origin-only quota.
   return 'provider:'+createHash('sha256').update(JSON.stringify([profile.provider,profile.baseUrl!.replace(/\/+$/,''),profile.apiKeyEnv??'anonymous'])).digest('hex');
 }
 export class ProviderState {
@@ -38,11 +37,10 @@ export class ProviderState {
     if(profile.provider==='mock') return;
     const h=this.row(profile);
     if(!error) {
-      // A late success from BEFORE the circuit opened must not close a newer outage.
       if(h.probe_call===callId||(!h.open_until&&!h.blocked)) this.store.run('UPDATE provider_health SET failures=0,open_until=0,blocked=0,last_error=NULL,probe_call=NULL,probe_until=0,updated_at=? WHERE scope=?',this.now(),h.scope);
       return;
     }
-    if(!['API_ERROR','AUTH_ERROR','RATE_LIMIT','TIMEOUT','CONFIG_ERROR'].includes(error)) return;
+    if(!['API_ERROR','AUTH_ERROR','RATE_LIMIT','TIMEOUT','CONFIG_ERROR','DELIVERY_UNKNOWN'].includes(error)) return;
     const failures=h.failures+1,permanent=error==='AUTH_ERROR'||error==='CONFIG_ERROR';
     const trip=permanent||error==='RATE_LIMIT'||failures>=profile.failureThreshold||h.open_until>0;
     const wait=Math.max(profile.circuitCooldownMs,Math.min(86400000,Math.max(0,retryAfterMs)));

@@ -91,17 +91,24 @@ export class SessionService {
       else {
         const policy=(x:ModelProfile)=>JSON.stringify([x.maxConcurrent,x.failureThreshold,x.circuitCooldownMs]);
         for(const other of this.modelProfiles().filter(x=>x.id!==p.id)) ensure(providerScope(other)!==providerScope(p)||policy(other)===policy(p),422,'CONFLICTING_PROVIDER_POLICY');
+        for(const agent of this.store.all<AgentRow>("SELECT a.* FROM agent_instances a JOIN sessions s ON s.id=a.session_id WHERE s.lifecycle!='ENDED'")) {
+          const frozen=profileOf(agent);
+          ensure(providerScope(frozen)!==providerScope(p)||policy(frozen)===policy(p),422,'ACTIVE_PROVIDER_POLICY_CONFLICT');
+        }
         this.store.run('INSERT INTO model_profiles(id,version,definition,hash) VALUES(?,?,?,?)',p.id,p.version,JSON.stringify(p),hash(p));
       }
       return p;
     });
   }
   providerDiagnostics() { return this.modelProfiles().map(profile=>({profile,health:this.providers.status(profile)})); }
-  retryProvider(profileId:string,key:string) {
-    return this.receipt('operator:provider',key,{profileId},()=>{
-      const p=this.modelProfiles().find(x=>x.id===profileId); ensure(p,404,'PROFILE_NOT_FOUND');
+  retryProvider(profileId:string,key:string,version?:number) {
+    return this.receipt('operator:provider',key,{profileId,...version===undefined?{}:{version}},()=>{
+      const row=version===undefined?undefined:this.store.get<{definition:string}>('SELECT definition FROM model_profiles WHERE id=? AND version=?',profileId,version);
+      const p=version===undefined?this.modelProfiles().find(x=>x.id===profileId):row?ModelProfileSchema.parse(JSON.parse(row.definition)):undefined;
+      ensure(p,404,'PROFILE_NOT_FOUND');
       this.providers.requestProbe(p);
-      for(const a of this.store.all<AgentRow>('SELECT * FROM agent_instances')) if(providerScope(profileOf(a))===providerScope(p)) {
+      for(const a of this.store.all<AgentRow>('SELECT * FROM agent_instances')) if(this.session(a.session_id).lifecycle!=='ENDED'&&providerScope(profileOf(a))===providerScope(p)) {
+        this.cancelRuns(a.session_id,'PROVIDER_RETRY',a.slot);
         this.store.run('UPDATE agent_instances SET error_count=0,retry_at=NULL,last_error=NULL WHERE id=?',a.id);
         this.wake(a.id,'RECOVERY'); this.trace(a.session_id,a.id,null,'PROVIDER_PROBE_REQUESTED');
       }
@@ -448,8 +455,9 @@ export class SessionService {
       ensure(c&&c.run_id===r.id,403,'CALL_FORBIDDEN'); const digest=hash({usage,error,retryAfterMs});
       if(c.result_hash) { ensure(c.result_hash===digest,409,'IDEMPOTENCY_CONFLICT'); return {ok:true}; }
       this.store.run('UPDATE llm_calls SET status=?,finished_at=?,input_tokens=?,output_tokens=?,error_code=?,result_hash=? WHERE id=?',
-        error==='TIMEOUT'||error==='CANCELLED'?'ABANDONED':'FINISHED',this.now(),usage.inputTokens,usage.outputTokens,error,digest,callId);
-      this.providers.finish(profileOf(this.agent(r.agent_id)),callId,error,retryAfterMs);
+        error==='TIMEOUT'||error==='CANCELLED'||error==='DELIVERY_UNKNOWN'?'ABANDONED':'FINISHED',this.now(),usage.inputTokens,usage.outputTokens,error,digest,callId);
+      // Meter late replies, but a fenced request cannot mutate the new circuit generation.
+      if(r.state==='ACTIVE') this.providers.finish(profileOf(this.agent(r.agent_id)),callId,error,retryAfterMs);
       return {ok:true};
     });
   }
