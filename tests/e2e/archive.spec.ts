@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { submitLogin } from './login-submit.js';
 const admin='e2e-test-operator-only-not-a-production-secret', viewer='e2e-viewer-read-only-not-a-production-secret';
 const headers={authorization:'Bearer '+admin};
 async function create(request:APIRequestContext,title:string){
@@ -12,8 +13,7 @@ async function post(request:APIRequestContext,id:string,text:string,replyTo:stri
   expect(response.ok()).toBe(true);return response.json();
 }
 async function login(page:Page,token=admin,path='/'){
-  await page.goto(path);await page.getByLabel('ログイントークン').fill(token);await page.getByRole('button',{name:'ログイン',exact:true}).click();
-  await expect(page.locator('.workspace-role')).toHaveText(token===admin?'管理者':'閲覧者');
+  await page.goto(path);await page.getByLabel('ログイントークン').fill(token);await submitLogin(page,token===admin?'管理者':'閲覧者');
 }
 
 test('R7-HISTORY-001: 1205 history rows, 270 matches and a 241-row old nested thread remain reachable across new arrivals and reconnect',async({page,request,context})=>{
@@ -56,8 +56,12 @@ test('R7-HISTORY-001: 1205 history rows, 270 matches and a 241-row old nested th
   const timeline=page.getByRole('log',{name:'会話履歴'});await timeline.evaluate(el=>{el.scrollTop=0;el.dispatchEvent(new Event('scroll'));});
   await post(request,id,'新着でも過去を消さない');await expect(page.locator('.timeline article')).toHaveCount(1206);
   expect(await timeline.evaluate(el=>el.scrollTop)).toBeLessThan(100);
-  const second=await context.newPage();await second.goto(`/?session=${id}&message=${messages[0].id}`);
-  await expect(second.locator(`.timeline [data-message-id="${messages[0].id}"]`)).toContainText('訂正後の最古本文');
+  const second=await context.newPage(),errors:string[]=[],reads:string[]=[];
+  second.on('pageerror',error=>errors.push(error.message.slice(0,120)));
+  second.on('response',response=>{const path=new URL(response.url()).pathname;if(path.endsWith('/lookup')||path.endsWith('/history')||path.endsWith('/auth/me'))reads.push(path.split('/').at(-1)+':'+response.status());});
+  await second.goto(`/?session=${id}&message=${messages[0].id}`);
+  try{await expect(second.locator(`.timeline [data-message-id="${messages[0].id}"]`)).toContainText('訂正後の最古本文');}
+  catch{throw new Error('DEEP_LINK rows='+await second.locator('.timeline article').count()+' alerts='+JSON.stringify(await second.getByRole('alert').allTextContents())+' errors='+JSON.stringify(errors)+' reads='+reads.join(','));}
   await context.setOffline(true);await expect(page.locator('.connection')).toContainText('再接続中');
   const removed=await request.post(`/v1/sessions/${id}/messages/${messages[0].id}`,{headers:{...headers,'idempotency-key':crypto.randomUUID()},data:{text:null}});expect(removed.ok()).toBe(true);
   await context.setOffline(false);
