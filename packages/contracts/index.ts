@@ -3,6 +3,8 @@ import { StatePatchSchema, type PrivateState, type ObservationManifest } from '.
 export * from './agent-state.js';
 import type { InputWindow, InputProgress, InputSelection } from './input-window.js';
 export * from './input-window.js';
+import type { AgendaContext } from './agenda.js';
+export * from './agenda.js';
 
 export const Id = z.string().uuid();
 export const Slug = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/);
@@ -46,6 +48,7 @@ export const SettingsSchema = z.object({
   maxDurationMs: z.number().int().min(1000).max(21600000).default(3600000),
   contextMessages: z.number().int().min(5).max(100).default(40),
   contextChars: z.number().int().min(4000).max(100000).default(24000),
+  agendaMinIntervalMs: z.number().int().min(100).max(86400000).default(30000),
   memoryShareEvery: z.number().int().min(1).max(32).default(3),
   memoryFlushMs: z.number().int().min(100).max(86400000).default(60000),
   memoryEvery: z.number().int().min(3).max(1000).default(12),
@@ -100,8 +103,6 @@ export const ErrorCodeSchema = z.enum(['API_ERROR', 'AUTH_ERROR', 'RATE_LIMIT', 
 export type ModelErrorCode = z.infer<typeof ErrorCodeSchema>;
 export type RunKind = 'decide' | 'draft' | 'review' | 'memory' | 'observe';
 export const ObserveSchema = z.object({ decision: z.literal('ABSTAIN'), reason: z.string().max(160) }).strict();
-// Legacy actions remain accepted for existing fixtures/clients. The envelope adds a
-// private state transition without adding fields to the public action contracts.
 export const StatefulOutputSchemas = {
   observe: z.object({ action: ObserveSchema, statePatch: StatePatchSchema.nullable() }).strict(),
   decide: z.object({ action: DecisionSchema, statePatch: StatePatchSchema.nullable() }).strict(),
@@ -135,6 +136,7 @@ export type PublicEvent = { id: string; sessionId: string; kind: string; revisio
 export type Context = {
   self: { id: string; character: Character; privateState?: PrivateState }; observation?: ObservationManifest; participants: PublicAgent[]; revision: number; trigger: string;
   messages: PublicMessage[]; delta: PublicMessage[]; historyTruncated: boolean;
+  agenda?: AgendaContext;
   delivery?: InputWindow; progress?: InputProgress; selection?: InputSelection;
   recall?: { algorithm: 'local-word-evidence-v1'; selected: {id:string;score:number;provenance:string}[]; omittedForBudget: string[] };
   coverage?: { fromRevision: number; throughRevision: number; targetRevision: number; complete: boolean };
@@ -158,7 +160,6 @@ export function ensure(condition: unknown, status: number, code: string): assert
   if (!condition) throw new AppError(status, code);
 }
 
-// LOOKUP is a bounded worker action, never a public utterance or an arbitrary tool call.
 export const LookupRequestSchema = z.object({
   kind: z.enum(['messages', 'memories', 'message']), query: z.string().trim().min(1).max(200),
   cursor: z.string().max(2048).nullable().default(null),
