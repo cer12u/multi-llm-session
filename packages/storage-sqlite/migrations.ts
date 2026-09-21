@@ -43,7 +43,6 @@ function migrateV2(db: Database.Database): void {
       UPDATE candidates SET state='NEEDS_REVIEW',reviewed_revision=0,reason='UPGRADE_REVIEW_REQUIRED'
         WHERE state IN ('READY','NEEDS_REVIEW') AND text IS NOT NULL;
     `);
-    // Keep previously authorized caps. Do not silently extend any old live experiment.
     for (const row of db.prepare('SELECT id,settings_json FROM sessions').all() as {id:string;settings_json:string}[]) {
       const s = JSON.parse(row.settings_json);
       if (s.selfWakeEnabled === undefined) s.selfWakeEnabled = s.selfWakeMaxMs < s.maxDurationMs;
@@ -53,8 +52,6 @@ function migrateV2(db: Database.Database): void {
   }).immediate();
 }
 
-
-/** V3 adds working state without inferring it from legacy notes or deleting those notes. */
 function migrateV3(db: Database.Database): void {
   const version = db.pragma('user_version', { simple: true }) as number;
   if (version === 3) return;
@@ -77,16 +74,14 @@ function migrateV3(db: Database.Database): void {
       INSERT INTO agent_private_states(agent_id,updated_at) SELECT id,0 FROM agent_instances;
       UPDATE runs SET state='CANCELLED' WHERE state='ACTIVE';
       UPDATE llm_calls SET status='ABANDONED' WHERE status='RESERVED';
-      UPDATE candidates SET state='NEEDS_REVIEW',reason='PRIVATE_STATE_UPGRADE'
-        WHERE state='READY';
+      UPDATE candidates SET state='NEEDS_REVIEW',reason='PRIVATE_STATE_UPGRADE' WHERE state='READY';
       PRAGMA user_version=3;
     `);
   }).immediate();
 }
 
-
-/** V4 uses an ordered notification log; old cursors are NOT assumed to prove past coverage. */
-export function migrate(db: Database.Database): void {
+/** Ordered notification log; old cursors are not assumed to prove past coverage. */
+function migrateV4(db: Database.Database): void {
   const version = db.pragma('user_version', { simple: true }) as number;
   if (version === 4) return;
   if (version < 3) migrateV3(db);
@@ -127,6 +122,32 @@ export function migrate(db: Database.Database): void {
       UPDATE llm_calls SET status='ABANDONED' WHERE status='RESERVED';
       UPDATE candidates SET state='NEEDS_REVIEW',reason='INPUT_CURSOR_UPGRADE' WHERE state='READY';
       PRAGMA user_version=4;
+    `);
+  }).immediate();
+}
+
+/** Retain one-shot, owner-selected agenda identity across changes and process restarts. */
+export function migrate(db: Database.Database): void {
+  const version = db.pragma('user_version', { simple: true }) as number;
+  if (version === 5) return;
+  if (version < 4) migrateV4(db);
+  else if (version !== 4) throw new Error('Unsupported migration source: ' + version);
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE agent_agenda(id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agent_instances(id),
+        entry_id TEXT NOT NULL, condition_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'PENDING'
+          CHECK(status IN ('PENDING','TRIGGERED','CONSUMED','CANCELLED')),
+        checked_input INTEGER NOT NULL, effective_at INTEGER, matched_input INTEGER, matched_version INTEGER,
+        notified INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, triggered_at INTEGER,
+        consumed_run TEXT REFERENCES runs(id), ended_at INTEGER, reason TEXT);
+      CREATE INDEX agenda_owner_status ON agent_agenda(agent_id,status);
+      CREATE TABLE agent_agenda_bindings(agent_id TEXT NOT NULL REFERENCES agent_instances(id),
+        entry_id TEXT NOT NULL, plan_id TEXT UNIQUE NOT NULL REFERENCES agent_agenda(id), PRIMARY KEY(agent_id,entry_id));
+      CREATE TABLE agent_agenda_clock(agent_id TEXT PRIMARY KEY REFERENCES agent_instances(id),last_wake_at INTEGER NOT NULL);
+      UPDATE runs SET state='CANCELLED' WHERE state='ACTIVE';
+      UPDATE llm_calls SET status='ABANDONED' WHERE status='RESERVED';
+      UPDATE candidates SET state='NEEDS_REVIEW',reason='AGENDA_UPGRADE' WHERE state='READY';
+      PRAGMA user_version=5;
     `);
   }).immediate();
 }
