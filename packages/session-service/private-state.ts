@@ -4,6 +4,7 @@ import {
   type Context, type EvidenceRef, type ObservationManifest, type PrivateState, type StatePatch,
 } from '../contracts/index.js';
 import type { Store, AgentRow, RunRow } from '../storage-sqlite/index.js';
+import { currentMemoryPredicate } from './memory-ledger.js';
 
 type StateRow = { agent_id: string; version: number; entries_json: string; updated_at: number };
 const refKey = (ref: EvidenceRef) => `${ref.kind}:${ref.id}:${ref.version}`;
@@ -49,6 +50,8 @@ export class PrivateStates {
     ensure(observed.id === this.manifest(context).id, 409, 'STATE_OBSERVATION_MISMATCH');
     const current = this.read(run.agent_id, run.session_id);
     ensure(captured.version === current.version, 409, 'STALE_PRIVATE_STATE');
+    const suppliedMemories=new Set([...context.memories,...(context.retrieved??[]).flatMap(r=>r.memories)].map(m=>m.id));
+    for(const id of suppliedMemories)ensure(this.store.get(`SELECT m.id FROM memories m WHERE m.id=? AND m.agent_id=? AND ${currentMemoryPredicate()}`,id,run.agent_id),409,'STALE_MEMORY_EVIDENCE');
     const entries = new Map(current.entries.map(entry => [entry.id, entry]));
     if (patch) {
       patch = StatePatchSchema.parse(patch);
@@ -60,6 +63,9 @@ export class PrivateStates {
       const allowed = new Set([...observed.messages, ...observed.sources].map(refKey));
       for (const entry of patch.upsert) {
         ensure(new Set(entry.evidence.map(refKey)).size === entry.evidence.length, 422, 'DUPLICATE_STATE_EVIDENCE');
+        const parents=entry.derivedFrom??[];
+        ensure(new Set(parents).size===parents.length,422,'DUPLICATE_STATE_MEMORY');
+        for(const id of parents)ensure(suppliedMemories.has(id),422,'UNOBSERVED_STATE_MEMORY');
         for (const ref of entry.evidence) {
           ensure(allowed.has(refKey(ref)), 422, 'UNOBSERVED_STATE_EVIDENCE');
           if (ref.kind === 'message') {
@@ -82,7 +88,6 @@ export class PrivateStates {
     const changed = JSON.stringify(current.entries) !== JSON.stringify(nextEntries);
     const next = PrivateStateSchema.parse({ ...current, entries: nextEntries,
       version: current.version + (changed ? 1 : 0), updatedAt: changed ? this.now() : current.updatedAt });
-    // Working-state capacity is not a retention policy. Every accepted removal/update remains in the private journal.
     ensure(JSON.stringify(next).length <= 16000, 422, 'PRIVATE_STATE_CAPACITY');
     if (changed) {
       const result = this.store.run('UPDATE agent_private_states SET version=?,entries_json=?,updated_at=? WHERE agent_id=? AND version=?',
@@ -95,7 +100,18 @@ export class PrivateStates {
     return { version: next.version, changed, observationId: observed.id };
   }
 
-  /** Conservatively remove directly dependent working entries; do not silently re-use edited/deleted facts. */
+  invalidateMemories(sessionId:string,memoryIds:string[]):void {
+    ensure(this.store.db.inTransaction,500,'STATE_TRANSACTION_REQUIRED');
+    if(!memoryIds.length)return;const affected=new Set(memoryIds);
+    for(const row of this.store.all<StateRow>(`SELECT p.* FROM agent_private_states p JOIN agent_instances a ON a.id=p.agent_id WHERE a.session_id=?`,sessionId)){
+      const current=this.read(row.agent_id,sessionId),entries=current.entries.filter(e=>!(e.derivedFrom??[]).some(id=>affected.has(id)));
+      if(entries.length===current.entries.length)continue;
+      this.store.run('UPDATE agent_private_states SET entries_json=?,version=version+1,updated_at=? WHERE agent_id=? AND version=?',JSON.stringify(entries),this.now(),row.agent_id,current.version);
+      this.store.run(`INSERT INTO agent_state_updates(agent_id,run_id,kind,from_version,to_version,observation_json,patch_json,before_json,after_json,created_at)
+        VALUES(?,NULL,'MEMORY_INVALIDATED',?,?,NULL,?,?,?,?)`,row.agent_id,current.version,current.version+1,JSON.stringify({memoryIds}),JSON.stringify(current.entries),JSON.stringify(entries),this.now());
+    }
+  }
+  /** Conservatively remove dependent entries; retained journal is private history, not current knowledge. */
   invalidateMessage(sessionId: string, messageId: string): void {
     ensure(this.store.db.inTransaction, 500, 'STATE_TRANSACTION_REQUIRED');
     const rows = this.store.all<StateRow>(`SELECT p.* FROM agent_private_states p JOIN agent_instances a ON a.id=p.agent_id

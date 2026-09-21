@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { migrateMemory } from './memory-migration.js';
 
 /** Additive, transactional migration: never discard conversation or private-memory rows. */
 function migrateV2(db: Database.Database): void {
@@ -127,7 +128,7 @@ function migrateV4(db: Database.Database): void {
 }
 
 /** Retain one-shot, owner-selected agenda identity across changes and process restarts. */
-export function migrate(db: Database.Database): void {
+function migrateV5(db: Database.Database): void {
   const version = db.pragma('user_version', { simple: true }) as number;
   if (version === 5) return;
   if (version < 4) migrateV4(db);
@@ -150,4 +151,11 @@ export function migrate(db: Database.Database): void {
       PRAGMA user_version=5;
     `);
   }).immediate();
+}
+
+export function migrate(db:Database.Database):void {
+  const version=db.pragma('user_version',{simple:true}) as number;
+  if(version===6)return;
+  if(version>6)throw new Error('Unsupported migration source: '+version);
+  migrateV5(db);migrateMemory(db);
 }

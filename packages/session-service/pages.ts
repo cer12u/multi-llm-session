@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { AppError, ensure, type PublicMessage, type MemoryNote, type Page } from '../contracts/index.js';
 import { Store, type MessageRow } from '../storage-sqlite/index.js';
+import { currentMemoryPredicate, memoryNote } from './memory-ledger.js';
 
 type Cursor = { v: 1; scope: string; high: number; position: number };
 type Options = { cursor?: string | null; limit?: number };
@@ -42,7 +43,6 @@ export class ArchivePages {
     this.session(session); ensure(query.trim().length>0&&query.length<=200,422,'INVALID_QUERY'); const limit=this.limit(options.limit);
     return this.store.tx(()=>{
       const s=this.store.get<{message_seq:number;edit_generation:number}>('SELECT message_seq,edit_generation FROM sessions WHERE id=?',session)!;
-      // Edit/delete may change matching membership. Force an explicit restart rather than silently skip results.
       const digest=createHash('sha256').update(query).digest('hex').slice(0,24);
       const c=this.cursor(`search:${session}:${digest}:${s.edit_generation}`,options.cursor,s.message_seq,'desc');
       const rows=[...query].length>=3?this.store.all<MessageRow>(
@@ -57,11 +57,12 @@ export class ArchivePages {
     const owner=this.store.get<{memory_seq:number}>('SELECT memory_seq FROM agent_instances WHERE id=?',agentId);
     ensure(owner,404,'AGENT_NOT_FOUND'); ensure(query.length<=200,422,'INVALID_QUERY'); const limit=this.limit(options.limit);
     const digest=createHash('sha256').update(query).digest('hex').slice(0,24);
-    const c=this.cursor('memory:'+agentId+':'+digest,options.cursor,owner.memory_seq,'desc');
-    const rows=this.store.all<{id:string;text:string;sources_json:string;sequence:number}>(
-      'SELECT * FROM memories WHERE agent_id=? AND sequence<=? AND sequence<? AND instr(text,?)>0 ORDER BY sequence DESC LIMIT ?',agentId,c.high,c.position,query,limit+1);
+    const generation=this.store.get<{n:number}>('SELECT COALESCE(MAX(id),0) n FROM memory_changes WHERE agent_id=?',agentId)!.n;
+    const c=this.cursor('memory:'+agentId+':'+digest+':'+generation,options.cursor,owner.memory_seq,'desc');
+    const rows=this.store.all<{id:string;agent_id:string;text:string;sources_json:string;created_at:number;sequence:number}>(
+      `SELECT m.* FROM memories m WHERE m.agent_id=? AND m.sequence<=? AND m.sequence<? AND instr(m.text,?)>0 AND ${currentMemoryPredicate()} ORDER BY m.sequence DESC LIMIT ?`,agentId,c.high,c.position,query,limit+1);
     const selected=rows.slice(0,limit);
-    return {items:selected.map(m=>({id:m.id,text:m.text,sourceMessageIds:JSON.parse(m.sources_json)})),highWater:c.high,
+    return {items:selected.map(m=>memoryNote(this.store,m)),highWater:c.high,
       nextCursor:rows.length>limit?this.token({...c,position:selected.at(-1)!.sequence}):null};
   }
   byIds(session: string, ids: string[]): PublicMessage[] {
