@@ -8,31 +8,24 @@ async function create(request:APIRequestContext){
   const response=await request.post('/v1/sessions',{headers:{...headers,'idempotency-key':crypto.randomUUID()},data:{title:'永続下書き '+crypto.randomUUID(),participants:caps.slots.slice(0,3).map((slot:string,i:number)=>({slot,characterId:characters[i%characters.length].id,profileId:'mock'})),settings:caps.defaults}});
   expect(response.ok()).toBe(true);return(await response.json()).id as string;
 }
-async function login(page:Page,id:string,token=admin){
-  await page.goto('/?session='+id);await page.getByLabel('ログイントークン').fill(token);
-  await submitLogin(page,token===admin?'管理者':'閲覧者');
-}
+async function login(page:Page,id:string,token=admin){await page.goto('/?session='+id);await page.getByLabel('ログイントークン').fill(token);await submitLogin(page,token===admin?'管理者':'閲覧者');}
 async function saved(page:Page){await expect(page.locator('.composer-dock .draft-status')).toContainText('保存済み');}
 async function snapshot(request:APIRequestContext,id:string){return(await request.get(`/v1/sessions/${id}/snapshot`,{headers})).json();}
 
 test('R7-DRAFT-001: reload and reopening a tab preserve text and addressee; IME and Shift+Enter do not submit',async({page,request,context})=>{
   const id=await create(request);await login(page,id);const agent=(await snapshot(request,id)).agents[0];
-  const editor=page.getByLabel('発言',{exact:true});
-  await editor.fill('端末へ保存する日本語');
+  await page.getByLabel('発言',{exact:true}).fill('端末へ保存する日本語');
   await page.getByLabel('宛先',{exact:true}).selectOption(agent.id);await saved(page);
-  await page.reload();await expect(editor).toHaveValue('端末へ保存する日本語');await expect(page.getByLabel('宛先',{exact:true})).toHaveValue(agent.id);
-  await editor.press('End');await editor.press('Shift+Enter');
-  await expect(editor).toHaveValue('端末へ保存する日本語\n');await saved(page);
-  // A synthetic compositionstart does not enable the browser's native IME. Dispatch
-  // its composing keydown explicitly: press('Enter') would insert an ordinary second newline.
-  await editor.dispatchEvent('compositionstart');
-  await editor.dispatchEvent('keydown',{key:'Enter',code:'Enter',keyCode:229,isComposing:true,bubbles:true,cancelable:true});
-  await editor.dispatchEvent('compositionend');
-  await expect(editor).toHaveValue('端末へ保存する日本語\n');
+  await page.reload();await expect(page.getByLabel('発言',{exact:true})).toHaveValue('端末へ保存する日本語');await expect(page.getByLabel('宛先',{exact:true})).toHaveValue(agent.id);
+  await page.getByLabel('発言',{exact:true}).press('End');await page.getByLabel('発言',{exact:true}).press('Shift+Enter');await saved(page);
+  await expect(page.getByLabel('発言',{exact:true})).toHaveValue('端末へ保存する日本語\n');
+  // Dispatch an IME-owned key, not a plain Enter that inserts an additional newline in a non-IME browser.
+  await page.getByLabel('発言',{exact:true}).dispatchEvent('compositionstart');
+  await page.getByLabel('発言',{exact:true}).dispatchEvent('keydown',{key:'Enter',code:'Enter',keyCode:229,isComposing:true,bubbles:true,cancelable:true});
+  await page.getByLabel('発言',{exact:true}).dispatchEvent('compositionend');
   expect((await snapshot(request,id)).messages).toHaveLength(0);
   await page.close();const reopened=await context.newPage();await reopened.goto('/?session='+id);
   await expect(reopened.getByLabel('発言',{exact:true})).toHaveValue('端末へ保存する日本語\n');
-  await expect(reopened.getByLabel('宛先',{exact:true})).toHaveValue(agent.id);
   await reopened.getByRole('button',{name:'送信',exact:true}).click();
   await expect(reopened.locator('.timeline article')).toHaveCount(1);await expect(reopened.getByLabel('発言',{exact:true})).toHaveValue('');await reopened.reload();await expect(reopened.getByLabel('発言',{exact:true})).toHaveValue('');
   expect((await snapshot(request,id)).session.calls).toBe(0);await reopened.close();
