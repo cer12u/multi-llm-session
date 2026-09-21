@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AgentInputs } from './inputs.js';
 import { PrivateStates } from './private-state.js';
 import { ArchivePages } from './pages.js';
 import { ProviderState, providerScope } from '../provider-state/index.js';
@@ -7,7 +8,7 @@ import { EventEmitter } from 'node:events';
 import {
   AppError, ensure, CharacterSchema, SessionCreateSchema, MessageInputSchema, SettingsSchema,
   ModelProfileSchema, LookupSchema, type ModelProfile, type LookupRequest, type RetrievalResult,
-  OutputSchemas, DecisionSchema, DraftSchema, ReviewSchema, MemorySchema, SourceSchema,
+  OutputSchemas, ObserveSchema, DecisionSchema, DraftSchema, ReviewSchema, MemorySchema, SourceSchema,
   type Character, type Intent, type Deferral, type RunKind, type ClaimedRun, type Context,
   type PublicAgent, type PublicMessage, type PublicSession, type PublicEvent, type Snapshot, type Usage, type ModelErrorCode,
 } from '../contracts/index.js';
@@ -25,11 +26,13 @@ export class SessionService {
   readonly pages: ArchivePages;
   readonly providers: ProviderState;
   private readonly privateStates: PrivateStates;
+  private readonly inputs: AgentInputs;
   constructor(readonly store: Store, readonly config: Config, readonly now: () => number = Date.now,
     readonly random: () => number = Math.random) {
     this.pages = new ArchivePages(store, row => this.publicMessage(row));
     this.providers = new ProviderState(store, now);
     this.privateStates = new PrivateStates(store, now);
+    this.inputs = new AgentInputs(store, now, row => this.publicMessage(row));
     this.changes.setMaxListeners(100);
     store.tx(() => {
       for (const slot of Object.keys(config.workerTokens)) store.run('INSERT OR IGNORE INTO workers(slot) VALUES(?)', slot);
@@ -288,6 +291,7 @@ export class SessionService {
       ensure(text===null||m.author_id===null,403,'BOT_TEXT_IMMUTABLE');
       this.store.run('UPDATE sessions SET revision=revision+1,edit_generation=edit_generation+1 WHERE id=?',session);
       this.store.run('UPDATE messages SET text=?,deleted=?,revision=? WHERE id=?',text??'',text===null?1:0,s.revision+1,messageId);
+      this.store.run("UPDATE agent_input_log SET created_at=? WHERE session_id=? AND kind='message' AND entity_id=? AND version=?",this.now(),session,messageId,s.revision+1);
       this.privateStates.invalidateMessage(session,messageId);
       this.store.run('DELETE FROM messages_fts WHERE message_id=?',messageId);
       this.store.run('DELETE FROM memories WHERE EXISTS (SELECT 1 FROM json_each(memories.sources_json) WHERE value=?)',messageId);
@@ -333,7 +337,7 @@ export class SessionService {
     ensure(r.state==='ACTIVE'&&r.worker_epoch===epoch&&r.session_epoch===s.epoch&&s.lifecycle==='RUNNING'&&a.enabled&&r.lease_until>this.now(),409,'STALE_RUN');
     return r;
   }
-  private context(agent: AgentRow, candidate?: CandidateRow): Context {
+  private context(agent: AgentRow, candidate?: CandidateRow, kind: RunKind='decide'): Context {
     const s=this.session(agent.session_id),st=settingsOf(s);
     let rows=this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY sequence DESC LIMIT ?',s.id,st.contextMessages).reverse();
     let chars=rows.reduce((n,m)=>n+m.text.length,0);
@@ -356,9 +360,10 @@ export class SessionService {
     const complete=delta.length===changed.length;
     const through=candidate?(complete?s.revision:delta.at(-1)!.revision):s.revision;
     const coverage=candidate?{fromRevision:candidate.reviewed_revision,throughRevision:through,targetRevision:s.revision,complete}:undefined;
-    return this.privateStates.prepare(agent,{self:{id:agent.id,character:characterOf(agent)},participants:this.agents(s.id).filter(a=>a.enabled).map(a=>this.publicAgent(a)),
+    const selected=this.privateStates.prepare(agent,{self:{id:agent.id,character:characterOf(agent)},participants:this.agents(s.id).filter(a=>a.enabled).map(a=>this.publicAgent(a)),
       revision:s.revision,trigger:agent.trigger,messages,delta,...coverage?{coverage}:{},historyTruncated:rows.length>0&&rows[0].revision>1,
       memories,questions,sources,candidate:candidate?{id:candidate.id,version:candidate.version,intent:intentOf(candidate),text:candidate.text,reviewedRevision:candidate.reviewed_revision}:null});
+    return this.privateStates.prepare(agent,this.inputs.context(agent,selected,kind,st));
   }
   private claimed(r: RunRow): ClaimedRun {
     const a=this.agent(r.agent_id),st=settingsOf(this.session(r.session_id));
@@ -374,18 +379,33 @@ export class SessionService {
       if(old) return this.claimed(old);
       for(const a of this.store.all<AgentRow>("SELECT a.* FROM agent_instances a JOIN sessions s ON s.id=a.session_id WHERE a.slot=? AND a.enabled=1 AND s.lifecycle='RUNNING' ORDER BY a.rowid",slot)) {
         const s=this.session(a.session_id),st=settingsOf(s),c=this.candidate(a.id);
-        if(!this.providers.mayClaim(profileOf(a),a.error_count,st.maxRetries)||a.deferral_json||(a.retry_at!==null&&a.retry_at>this.now())||(a.due_at!==null&&a.due_at>this.now())) continue;
+        if(!this.providers.mayClaim(profileOf(a),a.error_count,st.maxRetries)||(a.retry_at!==null&&a.retry_at>this.now())) continue;
+        const pendingInput=this.inputs.progress(a.id,s.id).observationPending>0;
+        const holding=!!a.deferral_json||this.now()<a.last_post_at+st.agentCooldownMs;
         let kind: RunKind|undefined;
-        if(c?.state==='DRAFTING') kind='draft';
-        else if(c?.state==='NEEDS_REVIEW') kind=c.text?'review':'draft';
-        else if(c) continue;
-        else if(a.wake_seq>a.processed_wake&&this.now()>=a.last_post_at+st.agentCooldownMs) kind='decide';
-        else if(a.wake_seq===a.processed_wake&&s.revision-a.memory_revision>=st.memoryEvery) kind='memory';
+        if(pendingInput&&holding) kind='observe';
+        else if(!holding&&(a.due_at===null||a.due_at<=this.now())) {
+          if(c?.state==='DRAFTING') kind='draft';
+          else if(c?.state==='NEEDS_REVIEW') kind=c.text?'review':'draft';
+          else if(!c&&a.wake_seq>a.processed_wake) kind='decide';
+          else if(pendingInput) kind='observe';
+        }
+        if(this.inputs.memoryTurn(a,st)||(!kind&&this.inputs.memoryDue(a,st))) kind='memory';
         if(!kind) continue;
-        const id=randomUUID(),token=randomUUID(),context=this.context(a,c);
+        let context:Context;
+        try {
+          context=this.context(a,kind==='memory'||kind==='observe'?undefined:c,kind);
+          if(kind==='decide'&&!context.delivery!.complete) { kind='observe';context=this.context(a,undefined,kind); }
+        } catch(error) {
+          if(!(error instanceof AppError)||error.code!=='CONTEXT_LIMIT') throw error;
+          this.store.run("UPDATE agent_instances SET state='error',last_error='CONTEXT_LIMIT',error_count=?,retry_at=NULL WHERE id=?",st.maxRetries+1,a.id);
+          this.trace(s.id,a.id,null,'INPUT_CONTEXT_LIMIT');this.emit(s.id,'agent.status',{agentId:a.id,status:'error',code:'CONTEXT_LIMIT'});continue;
+        }
+        const id=randomUUID(),token=randomUUID();
+        const runCandidate=kind==='memory'||kind==='observe'?undefined:c;
         this.store.run('INSERT INTO runs(id,agent_id,session_id,slot,worker_epoch,session_epoch,kind,token,state,snapshot_revision,wake_seq,candidate_id,candidate_version,created_at,lease_until,context_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-          id,a.id,s.id,slot,epoch,s.epoch,kind,token,'ACTIVE',context.coverage?.throughRevision??s.revision,a.wake_seq,c?.id??null,c?.version??null,this.now(),this.now()+st.leaseMs,JSON.stringify(context));
-        this.store.run('UPDATE agent_instances SET state=? WHERE id=?',kind==='review'?'reviewing':kind==='memory'?'remembering':'thinking',a.id);
+          id,a.id,s.id,slot,epoch,s.epoch,kind,token,'ACTIVE',context.coverage?.throughRevision??s.revision,a.wake_seq,runCandidate?.id??null,runCandidate?.version??null,this.now(),this.now()+st.leaseMs,JSON.stringify(context));
+        this.store.run('UPDATE agent_instances SET state=? WHERE id=?',kind==='review'?'reviewing':kind==='memory'?'remembering':kind==='observe'?'observing':'thinking',a.id);
         this.trace(s.id,a.id,id,'RUN_STARTED',{kind,revision:s.revision}); this.emit(s.id,'agent.status',{agentId:a.id,status:kind==='review'?'reviewing':'thinking'});
         return this.claimed(this.store.get<RunRow>('SELECT * FROM runs WHERE id=?',id)!);
       }
@@ -467,9 +487,12 @@ export class SessionService {
       ensure(this.store.get<{n:number}>("SELECT COUNT(*) n FROM llm_calls WHERE run_id=? AND status='FINISHED' AND error_code IS NULL AND context_hash=?",id,hash(r.context_json))!.n>0,409,'MODEL_CALL_NOT_RECORDED');
       const c=r.candidate_id?this.store.get<CandidateRow>('SELECT * FROM candidates WHERE id=?',r.candidate_id):undefined;
       if(r.candidate_id) ensure(c&&c.version===r.candidate_version&&c.agent_id===r.agent_id&&!['COMMITTED','DROPPED'].includes(c.state),409,'STALE_CANDIDATE');
-      const ready=r.snapshot_revision===s.revision&&r.wake_seq===a.wake_seq;
+      const delivery=(JSON.parse(r.context_json) as Context).delivery!;
+      const ready=r.snapshot_revision===s.revision&&r.wake_seq===a.wake_seq&&delivery.complete&&delivery.targetInput===this.inputs.high(s.id);
       const notBefore=Math.max(this.now()+st.arbitrationMs+Math.floor(this.random()*Math.min(500,st.arbitrationMs)),a.last_post_at+st.agentCooldownMs);
-      if(r.kind==='decide') {
+      if(r.kind==='observe') {
+        ObserveSchema.parse(action);this.trace(s.id,a.id,id,'OBSERVED_WITHOUT_PUBLICATION');
+      } else if(r.kind==='decide') {
         const result=DecisionSchema.parse(action);
         if(result.decision==='SPEAK') {
           this.validateIntent(s.id,a.id,result.intent);
@@ -498,25 +521,29 @@ export class SessionService {
       } else {
         const result=MemorySchema.parse(action);
         for(const note of result.notes) {
-          for(const ref of note.sourceMessageIds) {
-            const m=this.store.get<MessageRow>('SELECT * FROM messages WHERE id=?',ref);
-            ensure(m&&m.session_id===s.id&&!m.deleted&&m.revision<=r.snapshot_revision,422,'INVALID_MEMORY_SOURCE');
-          }
+          const evidence=this.inputs.validateMemory(r,note.sourceMessageIds);
           const sources=JSON.stringify([...new Set(note.sourceMessageIds)].sort());
           if(!this.store.get('SELECT id FROM memories WHERE agent_id=? AND text=? AND sources_json=?',a.id,note.text,sources)) {
             this.store.run('UPDATE agent_instances SET memory_seq=memory_seq+1 WHERE id=?',a.id);
             const sequence=this.store.get<{memory_seq:number}>('SELECT memory_seq FROM agent_instances WHERE id=?',a.id)!.memory_seq;
-            this.store.run('INSERT INTO memories(id,agent_id,text,sources_json,created_at,sequence) VALUES(?,?,?,?,?,?)',randomUUID(),a.id,note.text,sources,this.now(),sequence);
+            const memoryId=randomUUID();
+            this.store.run('INSERT INTO memories(id,agent_id,text,sources_json,created_at,sequence) VALUES(?,?,?,?,?,?)',memoryId,a.id,note.text,sources,this.now(),sequence);
+            this.store.run('INSERT INTO memory_input_origins(memory_id,run_id,evidence_json) VALUES(?,?,?)',memoryId,r.id,JSON.stringify(evidence));
           }
         }
         // Retention is separate from prompt selection. Never evict old memories to limit a prompt.
-        this.store.run('UPDATE agent_instances SET memory_revision=? WHERE id=?',r.snapshot_revision,a.id);
+        const supplied=(JSON.parse(r.context_json) as Context).messages;
+        this.store.run('UPDATE agent_instances SET memory_revision=MAX(memory_revision,?) WHERE id=?',Math.max(0,...supplied.map(m=>m.revision)),a.id);
         this.trace(s.id,a.id,id,'MEMORY_SAVED',{notes:result.notes.length});
       }
       const stateResult=this.privateStates.complete(r,statePatch);
       this.trace(s.id,a.id,id,'PRIVATE_STATE_APPLIED',stateResult);
+      this.inputs.complete(r);
+      const active=this.candidate(a.id);
+      if(active&&['decide','draft','review'].includes(r.kind)) this.inputs.bindCandidate(active.id,stateResult.version);
+      else if(active?.state==='READY'&&stateResult.changed) this.store.run("UPDATE candidates SET state='NEEDS_REVIEW',reason='PRIVATE_STATE_CHANGED' WHERE id=?",active.id);
       this.store.run("UPDATE runs SET state='DONE',result_hash=?,result_json=? WHERE id=?",digest,JSON.stringify({ok:true}),id);
-      if(r.kind!=='memory') this.store.run('UPDATE agent_instances SET processed_revision=MAX(processed_revision,?),processed_wake=MAX(processed_wake,?) WHERE id=?',r.snapshot_revision,r.wake_seq,a.id);
+      if(r.kind!=='memory'&&r.kind!=='observe') this.store.run('UPDATE agent_instances SET processed_revision=MAX(processed_revision,?),processed_wake=MAX(processed_wake,?) WHERE id=?',r.snapshot_revision,delivery.complete?r.wake_seq:a.processed_wake,a.id);
       const next=this.agent(a.id),cand=this.candidate(a.id);
       const status=next.deferral_json||cand?'waiting':'listening';
       const due=next.deferral_json?next.due_at:cand&&cand.state!=='READY'?this.now():next.wake_seq>next.processed_wake?(next.due_at??this.now()):null;
@@ -553,7 +580,7 @@ export class SessionService {
     const selected=selectCandidate(eligible,s.revision,this.now(),st.agingMs,targets,latest?latest.created_at+st.replyGraceMs:0);
     if(!selected) return null;
     const c=all.find(c=>c.id===selected.id)!;
-    if(c.review_due_at<=this.now()) { this.store.run("UPDATE candidates SET state='NEEDS_REVIEW' WHERE id=?",c.id); return null; }
+    if(c.review_due_at<=this.now()||!this.inputs.candidateCurrent(c.id,c.agent_id)) { this.store.run("UPDATE candidates SET state='NEEDS_REVIEW' WHERE id=?",c.id); return null; }
     ensure(c.text,409,'EMPTY_CANDIDATE');
     try { this.validateIntent(id,c.agent_id,intentOf(c)); }
     catch(e) { if(!(e instanceof AppError)) throw e; this.store.run("UPDATE candidates SET state='NEEDS_REVIEW' WHERE id=?",c.id); this.trace(id,c.agent_id,null,'REFERENCE_REVIEW_REQUIRED'); return null; }
@@ -594,7 +621,7 @@ export class SessionService {
         }
         this.commitOne(s.id); s=this.session(s.id); if(s.lifecycle!=='RUNNING') continue;
         const agents=this.agents(s.id).filter(a=>a.enabled);
-        const busy=agents.some(a=>a.wake_seq>a.processed_wake&&a.error_count<=settingsOf(s).maxRetries||!!this.candidate(a.id))||
+        const busy=agents.some(a=>(!a.deferral_json&&a.wake_seq>a.processed_wake&&a.error_count<=settingsOf(s).maxRetries)||this.inputs.progress(a.id,s.id).observationPending>0||this.inputs.memoryDue(a,settingsOf(s))||!!this.candidate(a.id))||
           !!this.store.get("SELECT id FROM runs WHERE session_id=? AND state='ACTIVE'",s.id);
         const activity=agents.some(a=>a.error_count>0||!this.publicAgent(a).workerOnline)?'DEGRADED':busy?'ACTIVE':'QUIET';
         if(activity!==s.activity) { this.store.run('UPDATE sessions SET activity=? WHERE id=?',activity,s.id); this.emit(s.id,'session.activity',{activity}); }
@@ -651,7 +678,7 @@ export class SessionService {
   }
   diagnostics(id: string): Record<string,unknown> {
     this.session(id);
-    return {providers:this.providerDiagnostics(),agents:this.agents(id).map(a=>({id:a.id,slot:a.slot,state:a.state,workerOnline:this.publicAgent(a).workerOnline,nextRetryAt:a.retry_at,lastError:a.last_error,processedRevision:a.processed_revision,dirtyRevision:a.dirty_revision,wakeSeq:a.wake_seq,processedWake:a.processed_wake,dueAt:a.due_at,errorCount:a.error_count,deferral:a.deferral_json?JSON.parse(a.deferral_json):null})),
+    return {providers:this.providerDiagnostics(),agents:this.agents(id).map(a=>({id:a.id,slot:a.slot,state:a.state,workerOnline:this.publicAgent(a).workerOnline,nextRetryAt:a.retry_at,lastError:a.last_error,processedRevision:a.processed_revision,dirtyRevision:a.dirty_revision,wakeSeq:a.wake_seq,processedWake:a.processed_wake,dueAt:a.due_at,errorCount:a.error_count,inputProgress:this.inputs.progress(a.id,id),deferral:a.deferral_json?JSON.parse(a.deferral_json):null})),
       candidates:this.store.all<CandidateRow>('SELECT * FROM candidates WHERE session_id=? ORDER BY first_interested_at DESC LIMIT 30',id),
       runs:this.store.all('SELECT id,agent_id,kind,state,snapshot_revision,created_at,lease_until FROM runs WHERE session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 30',id),
       traces:this.store.all('SELECT agent_id,run_id,code,detail,created_at FROM traces WHERE session_id=? ORDER BY id DESC LIMIT 150',id),metrics:this.metrics(id)};
