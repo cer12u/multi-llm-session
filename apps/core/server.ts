@@ -7,6 +7,7 @@ import { AppError, ensure, Id, UsageSchema, ErrorCodeSchema, type ModelErrorCode
 import { LookupRequestSchema, Slug } from '../../packages/contracts/index.js';
 import { credential } from '../../packages/config/credentials.js';
 import { SessionService } from '../../packages/session-service/index.js';
+import { registerCharacterRoutes } from './character-routes.js';
 
 type Role='operator'|'viewer';
 type Login={role:Role;csrf:string;expires:number};
@@ -93,6 +94,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
     const p=principal(req);return service.characters().map(c=>p.role==='operator'?c:{schemaVersion:c.schemaVersion,id:c.id,version:c.version,name:c.name,presentationRef:c.presentationRef});
   });
   app.post('/v1/characters',async req=>{principal(req,true,true);return service.store.tx(()=>service.putCharacter(req.body));});
+  registerCharacterRoutes(app,service,(req,write=false)=>{ principal(req,write,true); });
   app.get('/v1/sessions',async req=>{principal(req);return service.listSessions();});
   app.post('/v1/sessions',async req=>{principal(req,true,true);return service.createSession(req.body,key(req));});
   for(const action of ['start','pause','resume','end'] as const) app.post(`/v1/sessions/:id/${action}`,async req=>{
