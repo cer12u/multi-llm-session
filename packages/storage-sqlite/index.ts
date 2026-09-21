@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { migrate } from './migrations.js';
+import { CURRENT_SCHEMA_VERSION } from './schema-version.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ModelProfileSchema, type Character, type ModelProfile, type Settings, type RunKind, type Intent } from '../contracts/index.js';
@@ -89,17 +90,18 @@ export class Store {
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
-    this.sqliteVersion = this.get<{version:string}>('SELECT sqlite_version() AS version')!.version;
-    const [major, minor, patch] = this.sqliteVersion.split('.').map(Number);
-    if (major < 3 || (major === 3 && (minor < 51 || (minor === 51 && patch < 3)))) {
-      this.db.close(); throw new Error('SQLite >= 3.51.3 is required; loaded ' + this.sqliteVersion);
-    }
-    this.db.pragma('journal_mode = WAL'); this.db.pragma('synchronous = FULL');
-    this.db.pragma('foreign_keys = ON'); this.db.pragma('busy_timeout = 5000');
-    const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version === 0) this.tx(() => this.db.exec(legacySchemaV1));
-    else if (version > 5) { this.db.close(); throw new Error('Unsupported database schema: ' + version); }
-    migrate(this.db);
+    try {
+      const version = this.db.pragma('user_version', { simple: true }) as number;
+      if(version===0&&this.get("SELECT name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*' LIMIT 1"))throw new Error('INVALID_APPLICATION_DATABASE');
+      if(version>CURRENT_SCHEMA_VERSION)throw new Error('Unsupported database schema: '+version);
+      this.sqliteVersion = this.get<{version:string}>('SELECT sqlite_version() AS version')!.version;
+      const [major, minor, patch] = this.sqliteVersion.split('.').map(Number);
+      if (major < 3 || (major === 3 && (minor < 51 || (minor === 51 && patch < 3)))) throw new Error('SQLite >= 3.51.3 is required; loaded ' + this.sqliteVersion);
+      this.db.pragma('journal_mode = WAL'); this.db.pragma('synchronous = FULL');
+      this.db.pragma('foreign_keys = ON'); this.db.pragma('busy_timeout = 5000');
+      if (version === 0) this.tx(() => this.db.exec(legacySchemaV1));
+      migrate(this.db);
+    } catch(error) { this.db.close(); throw error; }
   }
   get<T>(sql: string, ...args: unknown[]): T|undefined { return this.db.prepare(sql).get(...args) as T|undefined; }
   all<T>(sql: string, ...args: unknown[]): T[] { return this.db.prepare(sql).all(...args) as T[]; }
