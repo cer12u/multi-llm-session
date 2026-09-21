@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { PrivateStates } from './private-state.js';
 import { ArchivePages } from './pages.js';
 import { ProviderState, providerScope } from '../provider-state/index.js';
 import { validateProfileUrl } from '../config/credentials.js';
@@ -23,10 +24,12 @@ export class SessionService {
   readonly changes = new EventEmitter();
   readonly pages: ArchivePages;
   readonly providers: ProviderState;
+  private readonly privateStates: PrivateStates;
   constructor(readonly store: Store, readonly config: Config, readonly now: () => number = Date.now,
     readonly random: () => number = Math.random) {
     this.pages = new ArchivePages(store, row => this.publicMessage(row));
     this.providers = new ProviderState(store, now);
+    this.privateStates = new PrivateStates(store, now);
     this.changes.setMaxListeners(100);
     store.tx(() => {
       for (const slot of Object.keys(config.workerTokens)) store.run('INSERT OR IGNORE INTO workers(slot) VALUES(?)', slot);
@@ -285,6 +288,7 @@ export class SessionService {
       ensure(text===null||m.author_id===null,403,'BOT_TEXT_IMMUTABLE');
       this.store.run('UPDATE sessions SET revision=revision+1,edit_generation=edit_generation+1 WHERE id=?',session);
       this.store.run('UPDATE messages SET text=?,deleted=?,revision=? WHERE id=?',text??'',text===null?1:0,s.revision+1,messageId);
+      this.privateStates.invalidateMessage(session,messageId);
       this.store.run('DELETE FROM messages_fts WHERE message_id=?',messageId);
       this.store.run('DELETE FROM memories WHERE EXISTS (SELECT 1 FROM json_each(memories.sources_json) WHERE value=?)',messageId);
       if(text!==null) this.store.run('INSERT INTO messages_fts(message_id,session_id,text) VALUES(?,?,?)',messageId,session,text);
@@ -352,9 +356,9 @@ export class SessionService {
     const complete=delta.length===changed.length;
     const through=candidate?(complete?s.revision:delta.at(-1)!.revision):s.revision;
     const coverage=candidate?{fromRevision:candidate.reviewed_revision,throughRevision:through,targetRevision:s.revision,complete}:undefined;
-    return {self:{id:agent.id,character:characterOf(agent)},participants:this.agents(s.id).filter(a=>a.enabled).map(a=>this.publicAgent(a)),
+    return this.privateStates.prepare(agent,{self:{id:agent.id,character:characterOf(agent)},participants:this.agents(s.id).filter(a=>a.enabled).map(a=>this.publicAgent(a)),
       revision:s.revision,trigger:agent.trigger,messages,delta,...coverage?{coverage}:{},historyTruncated:rows.length>0&&rows[0].revision>1,
-      memories,questions,sources,candidate:candidate?{id:candidate.id,version:candidate.version,intent:intentOf(candidate),text:candidate.text,reviewedRevision:candidate.reviewed_revision}:null};
+      memories,questions,sources,candidate:candidate?{id:candidate.id,version:candidate.version,intent:intentOf(candidate),text:candidate.text,reviewedRevision:candidate.reviewed_revision}:null});
   }
   private claimed(r: RunRow): ClaimedRun {
     const a=this.agent(r.agent_id),st=settingsOf(this.session(r.session_id));
@@ -435,10 +439,12 @@ export class SessionService {
         const page=this.pages.search(r.session_id,request.query,{limit:2,cursor:request.cursor});
         return {request,messages:page.items,memories:[],nextCursor:page.nextCursor};
       });
-      const context=JSON.parse(r.context_json) as Context;
+      let context=JSON.parse(r.context_json) as Context;
+      ensure(context.self.privateState?.version===this.privateStates.read(r.agent_id,r.session_id).version,409,'STALE_PRIVATE_STATE');
       context.retrieved=[...(context.retrieved??[]),...results];
       // The model adapter may trim optional recent context, never review or retrieval evidence.
       ensure(JSON.stringify(context.retrieved).length<=settingsOf(this.session(r.session_id)).contextChars,422,'LOOKUP_CONTEXT_LIMIT');
+      context=this.privateStates.prepare(this.agent(r.agent_id),context);
       this.store.run('UPDATE runs SET context_json=?,retrieval_count=retrieval_count+1 WHERE id=?',JSON.stringify(context),id);
       this.trace(r.session_id,r.agent_id,id,'ARCHIVE_RETRIEVED',{requests:requests.length}); return context;
     });
@@ -452,6 +458,8 @@ export class SessionService {
   }
   completeRun(slot: string, epoch: number, id: string, token: string, output: unknown): {ok:true} {
     const before=this.ownRun(slot,id,token),parsed=OutputSchemas[before.kind].parse(output),digest=hash(parsed);
+    const action='action' in parsed?parsed.action:parsed;
+    const statePatch='statePatch' in parsed?parsed.statePatch:undefined;
     return this.write(()=>{
       const existing=this.ownRun(slot,id,token);
       if(existing.state==='DONE') { ensure(existing.result_hash===digest,409,'IDEMPOTENCY_CONFLICT'); return {ok:true}; }
@@ -462,7 +470,7 @@ export class SessionService {
       const ready=r.snapshot_revision===s.revision&&r.wake_seq===a.wake_seq;
       const notBefore=Math.max(this.now()+st.arbitrationMs+Math.floor(this.random()*Math.min(500,st.arbitrationMs)),a.last_post_at+st.agentCooldownMs);
       if(r.kind==='decide') {
-        const result=DecisionSchema.parse(parsed);
+        const result=DecisionSchema.parse(action);
         if(result.decision==='SPEAK') {
           this.validateIntent(s.id,a.id,result.intent);
           ensure(!this.candidate(a.id),409,'CANDIDATE_ALREADY_EXISTS');
@@ -471,13 +479,13 @@ export class SessionService {
         } else if(result.decision==='DEFER') this.defer(a.id,result.defer);
         this.trace(s.id,a.id,id,result.decision);
       } else if(r.kind==='draft') {
-        const result=DraftSchema.parse(parsed); ensure(c,409,'CANDIDATE_MISSING');
+        const result=DraftSchema.parse(action); ensure(c,409,'CANDIDATE_MISSING');
         if(result.decision==='DROP') this.store.run("UPDATE candidates SET state='DROPPED',reason='MODEL_DROP' WHERE id=?",c.id);
         else this.store.run('UPDATE candidates SET text=?,version=version+1,state=?,reviewed_revision=?,reviewed_wake=?,not_before=?,review_due_at=? WHERE id=?',
           result.text,ready?'READY':'NEEDS_REVIEW',r.snapshot_revision,r.wake_seq,notBefore,this.now()+st.reviewTtlMs,c.id);
         this.trace(s.id,a.id,id,result.decision,{stale:!ready});
       } else if(r.kind==='review') {
-        const result=ReviewSchema.parse(parsed); ensure(c,409,'CANDIDATE_MISSING');
+        const result=ReviewSchema.parse(action); ensure(c,409,'CANDIDATE_MISSING');
         if(result.decision==='DROP') this.store.run("UPDATE candidates SET state='DROPPED',reason='MODEL_DROP' WHERE id=?",c.id);
         else if(result.decision==='DEFER') this.defer(a.id,result.defer);
         else {
@@ -488,7 +496,7 @@ export class SessionService {
         }
         this.trace(s.id,a.id,id,'REVIEW_'+result.decision,{from:c.reviewed_revision,to:r.snapshot_revision,stale:!ready});
       } else {
-        const result=MemorySchema.parse(parsed);
+        const result=MemorySchema.parse(action);
         for(const note of result.notes) {
           for(const ref of note.sourceMessageIds) {
             const m=this.store.get<MessageRow>('SELECT * FROM messages WHERE id=?',ref);
@@ -505,6 +513,8 @@ export class SessionService {
         this.store.run('UPDATE agent_instances SET memory_revision=? WHERE id=?',r.snapshot_revision,a.id);
         this.trace(s.id,a.id,id,'MEMORY_SAVED',{notes:result.notes.length});
       }
+      const stateResult=this.privateStates.complete(r,statePatch);
+      this.trace(s.id,a.id,id,'PRIVATE_STATE_APPLIED',stateResult);
       this.store.run("UPDATE runs SET state='DONE',result_hash=?,result_json=? WHERE id=?",digest,JSON.stringify({ok:true}),id);
       if(r.kind!=='memory') this.store.run('UPDATE agent_instances SET processed_revision=MAX(processed_revision,?),processed_wake=MAX(processed_wake,?) WHERE id=?',r.snapshot_revision,r.wake_seq,a.id);
       const next=this.agent(a.id),cand=this.candidate(a.id);
