@@ -1,0 +1,10 @@
+import { spawnSync } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
+const result=spawnSync(process.execPath,['deploy/smoke-multiprovider.mjs'],{encoding:'utf8',maxBuffer:8*1024*1024,timeout:600000});
+process.stdout.write(result.stdout??'');process.stderr.write(result.stderr??'');
+const status=result.status??1;
+const text=((result.stderr??'')+'\n'+(result.stdout??'')).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'');
+const line=text.split(/\r?\n/).find(line=>/^(?:Error|AssertionError|TypeError|SyntaxError)(?:\s*\[[^\]]+\])?:/.test(line.trim()));
+const detail=(status===0?'shared and mixed: isolated non-root HTTP workers, persistent memory and circuit passed':line??result.error?.message??'Deployment command failed; inspect synthetic log').replace(/[\r\n\x00-\x1f]/g,' ').slice(0,230);
+if(process.env.GITHUB_OUTPUT)appendFileSync(process.env.GITHUB_OUTPUT,'detail='+detail+'\n');
+process.exitCode=status;

@@ -13,6 +13,8 @@ jobs:
   multi-provider-compose:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      detail: ${{ steps.build.outputs.diagnostic || steps.proof.outputs.detail }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -22,10 +24,12 @@ jobs:
           node-version: '24.20.0'
           package-manager-cache: false
       - run: npm ci
-      - run: npm run build
+      - id: build
+        run: node deploy/ci-check.mjs build
       - run: docker build -f deploy/Dockerfile -t multi-llm-session:ci .
       - name: Non-root shared-model and heterogeneous HTTP Provider clusters
-        run: node deploy/smoke-multiprovider.mjs
+        id: proof
+        run: node deploy/ci-deployment-check.mjs
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -33,3 +37,11 @@ jobs:
           path: artifacts/multiprovider-compose.json
           retention-days: 7
           if-no-files-found: warn
+  deployment-detail:
+    needs: multi-provider-compose
+    if: always()
+    name: "Deployment diagnostic only — ${{ needs.multi-provider-compose.outputs.detail || 'Inspect deployment job' }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: echo 'This job only displays bounded synthetic diagnostics. The multi-provider-compose job is authoritative.'
