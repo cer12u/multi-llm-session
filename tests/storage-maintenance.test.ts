@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { fixture } from './helpers.js';
 import { backupDatabase, inspectDatabase, maintainDatabase, restoreDatabase } from '../packages/storage-sqlite/maintenance.js';
 import { Store } from '../packages/storage-sqlite/index.js';
+import { CURRENT_SCHEMA_VERSION } from '../packages/storage-sqlite/schema-version.js';
 import { SessionService } from '../packages/session-service/index.js';
 import { ModelProfileSchema, type PublicMessage } from '../packages/contracts/index.js';
 
@@ -30,9 +31,9 @@ it('R10-STORAGE-002: online SQLite backup includes committed WAL, restores every
   const cursor=f.store.get('SELECT * FROM agent_input_cursors WHERE agent_id=?',s.agentId);
   const agenda=f.store.all('SELECT * FROM agent_agenda WHERE agent_id=?',s.agentId);
   const origins=f.store.all('SELECT * FROM memory_input_origins');
+  const metadata=f.store.all('SELECT * FROM memory_metadata'),changes=f.store.all('SELECT * FROM memory_changes');
   const backup=join(f.dir,'backups','consistent.sqlite'),restored=join(f.dir,'restored','session.sqlite');
   const promise=backupDatabase(f.config.dbPath,backup);
-  // The writer remains open and may commit while backup runs; target must be a complete valid snapshot, not a raw main-file copy.
   f.say('オンラインbackup中の独立した確定');const recorded=await promise;
   expect(recorded.integrity).toBe('ok');expect(recorded.rows.messages).toBeGreaterThanOrEqual(3);expect(recorded.rows.messages).toBeLessThanOrEqual(4);
   expect(statSync(backup).mode&0o077).toBe(0);
@@ -43,6 +44,7 @@ it('R10-STORAGE-002: online SQLite backup includes committed WAL, restores every
   expect(db.get('SELECT * FROM agent_input_cursors WHERE agent_id=?',s.agentId)).toEqual(cursor);
   expect(db.all('SELECT * FROM agent_agenda WHERE agent_id=?',s.agentId)).toEqual(agenda);
   expect(db.all('SELECT * FROM memory_input_origins')).toEqual(origins);
+  expect(db.all('SELECT * FROM memory_metadata')).toEqual(metadata);expect(db.all('SELECT * FROM memory_changes')).toEqual(changes);
   expect(service.pages.memories(s.agentId,'復元後').items).toHaveLength(1);
   expect(service.providers.status(provider).state).toBe('BLOCKED');
   expect(service.humanMessage(f.id,{text:'復元する原文'},key).id).toBe(original.id);
@@ -90,12 +92,13 @@ it('R10-STORAGE-005: SQLite capacity failure rolls back the transaction and neve
   expect(f.store.all("SELECT * FROM traces WHERE code='MUST_ROLL_BACK'")).toHaveLength(0);
   expect(f.service.snapshot(f.id).messages[0].id).toBe(original.id);
   f.store.db.pragma('max_page_count = '+oldMaximum);f.say('容量回復後');expect(f.service.snapshot(f.id).messages).toHaveLength(2);
-  expect(f.store.db.pragma('user_version',{simple:true})).toBe(5);
+  expect(f.store.db.pragma('user_version',{simple:true})).toBe(CURRENT_SCHEMA_VERSION);
 });
 
 it('R10-STORAGE-006: a failed populated V2 migration leaves its committed schema and records intact for explicit repair',()=>{
   const f=setup();const original=f.say('移行失敗でも保持');
-  f.store.db.exec(`DROP TABLE agent_agenda_bindings; DROP TABLE agent_agenda_clock; DROP TABLE agent_agenda;
+  f.store.db.exec(`DROP TABLE memory_changes; DROP TABLE memory_edges; DROP TABLE memory_metadata;
+    DROP TABLE agent_agenda_bindings; DROP TABLE agent_agenda_clock; DROP TABLE agent_agenda;
     DROP TRIGGER input_message_insert; DROP TRIGGER input_message_update; DROP TRIGGER input_source_insert;
     DROP TABLE memory_input_origins; DROP TABLE candidate_state_bindings; DROP TABLE agent_input_receipts;
     DROP TABLE agent_input_cursors; DROP TABLE agent_input_log; DROP TABLE agent_state_updates; DROP TABLE agent_private_states;
@@ -106,10 +109,9 @@ it('R10-STORAGE-006: a failed populated V2 migration leaves its committed schema
     expect(db.pragma('user_version',{simple:true})).toBe(2);
     expect(db.prepare('SELECT id,text FROM messages WHERE id=?').get(original.id)).toEqual({id:original.id,text:original.text});
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name='agent_state_updates'").get()).toBeUndefined();
-    // Repair only this synthetic conflicting object, then exercise the normal upgrade again.
     db.exec('DROP TABLE agent_private_states;');
   }finally{db.close();}
   const restored=new Store(f.config.dbPath);cleanup.push(()=>restored.close());
-  expect(restored.db.pragma('user_version',{simple:true})).toBe(5);
+  expect(restored.db.pragma('user_version',{simple:true})).toBe(CURRENT_SCHEMA_VERSION);
   expect(restored.get<{id:string}>('SELECT id FROM messages WHERE id=?',original.id)!.id).toBe(original.id);
 });
