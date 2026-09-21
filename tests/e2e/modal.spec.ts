@@ -1,9 +1,10 @@
 import { expect, test } from '@playwright/test';
+import { submitLogin } from './login-submit.js';
 
 test('a rejected session form shows its error inside the dialog and remains editable', async ({ page }) => {
   await page.goto('/');
   await page.getByLabel('ログイントークン').fill('e2e-test-operator-only-not-a-production-secret');
-  await page.getByRole('button', { name: 'ログイン', exact: true }).click();
+  await submitLogin(page,'管理者');
   await page.getByRole('button', { name: '新しいセッション', exact: true }).first().click();
   const dialog = page.getByRole('dialog', { name: '新しいセッション', exact: true });
   await dialog.getByLabel('セッション名').fill('   ');

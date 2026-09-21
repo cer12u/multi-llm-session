@@ -14,7 +14,7 @@ export function subscribeSession(load:()=>Promise<Snapshot>,publish:(snapshot:Sn
   const refresh=async()=>{
     dirty=true;if(fetching||closed)return;fetching=true;const expected=generation;
     try{while(dirty&&!closed&&expected===generation){dirty=false;const snapshot=await load();if(!closed&&expected===generation)publish(snapshot);}}
-    catch{reconnect();}finally{fetching=false;}
+    catch{if(!closed&&expected===generation)reconnect();}finally{fetching=false;}
   };
   const requestRefresh=()=>{
     if(closed)return;dirty=true;
@@ -31,15 +31,25 @@ export function subscribeSession(load:()=>Promise<Snapshot>,publish:(snapshot:Sn
       source.onerror=()=>{if(!closed&&expected===generation)reconnect();};
       source.onmessage=event=>{
         if(closed||expected!==generation)return;
-        // Unknown/malformed extension data cannot enter an adapter. The established snapshot path still recovers.
         let accepted=false;
         try{if(typeof event?.data==='string'&&event.data.length<=65536)accepted=presentation?.receive(JSON.parse(event.data))??false;}catch{}
         if(!accepted)requestRefresh();
       };
-    }catch{reconnect();}
+    }catch{if(!closed&&expected===generation)reconnect();}
   };
   const offline=()=>reconnect();
-  if(typeof window!=='undefined')window.addEventListener('offline',offline);
+  const online=()=>{
+    if(closed)return;
+    // A positive browser connectivity event should not wait for an old, increasing offline retry delay.
+    generation++;if(retry)clearTimeout(retry);retry=null;
+    if(refreshTimer)clearTimeout(refreshTimer);refreshTimer=null;
+    source?.close();source=null;presentation?.dispose();presentation=null;backoff=1000;
+    status('再接続中');void connect();
+  };
+  if(typeof window!=='undefined'){window.addEventListener('offline',offline);window.addEventListener('online',online);}
   void connect();
-  return()=>{if(typeof window!=='undefined')window.removeEventListener('offline',offline);closed=true;generation++;source?.close();presentation?.dispose();if(retry)clearTimeout(retry);if(refreshTimer)clearTimeout(refreshTimer);};
+  return()=>{
+    if(typeof window!=='undefined'){window.removeEventListener('offline',offline);window.removeEventListener('online',online);}
+    closed=true;generation++;source?.close();presentation?.dispose();if(retry)clearTimeout(retry);if(refreshTimer)clearTimeout(refreshTimer);
+  };
 }
