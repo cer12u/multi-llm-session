@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs';
-import { resolve, relative, join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync, rmSync, statSync, realpathSync } from 'node:fs';
+import { resolve, relative, join, dirname, basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { CharacterSchema, ModelProfileSchema, SettingsSchema, Slug, ensure } from '../contracts/index.js';
@@ -35,8 +35,9 @@ const reserved = /^(?:ADMIN_TOKEN|VIEWER_TOKEN|WORKER_TOKEN|WORKER_.*_TOKEN|NODE
 
 /** Create-only output outside the source tree: private configuration/secrets never enter a build context. */
 export function generateDeployment(input:unknown, output:string, repository=process.cwd()):DeploymentResult {
-  const data=DeploymentSchema.parse(input), root=resolve(repository), target=resolve(output);
-  const rel=relative(root,target);
+  const data=DeploymentSchema.parse(input), root=realpathSync(resolve(repository)), target=resolve(output);
+  const physicalTarget=join(realpathSync(dirname(target)),basename(target));
+  const rel=relative(root,physicalTarget);
   ensure(rel.startsWith('..'+(process.platform==='win32'?'\\':'/')) || rel==='..',422,'DEPLOY_OUTPUT_MUST_BE_OUTSIDE_REPOSITORY');
   ensure(process.platform!=='win32',422,'DEPLOY_LINUX_REQUIRED');
   ensure(new URL(data.publicOrigin).origin===data.publicOrigin,422,'PUBLIC_ORIGIN_MUST_BE_ORIGIN');
@@ -93,7 +94,7 @@ export function generateDeployment(input:unknown, output:string, repository=proc
     // Core validates configured credential presence; it receives only model bindings named in this configuration.
     for(const [name,id] of credentialSecrets)core.environment[name+'_FILE']='/run/secrets/'+id;
     core.volumes=['session-data:/data',configPath+':/config/app.json:ro'];core.ports=[`127.0.0.1:${data.port}:3000`];
-    core.healthcheck={test:['CMD','node','-e',"fetch('http://127.0.0.1:3000/healthz',{headers:{host:new URL(process.env.PUBLIC_ORIGIN).host}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"],interval:'3s',timeout:'3s',retries:20};
+    core.healthcheck={test:['CMD','node','-e',"require('node:http').get({hostname:'127.0.0.1',port:3000,path:'/healthz',headers:{host:new URL(process.env.PUBLIC_ORIGIN).host}},r=>{r.resume();process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1)).setTimeout(2000,function(){this.destroy()})"],interval:'3s',timeout:'3s',retries:20};
     const services:Record<string,ComposeService>={core};
     data.workers.forEach((worker,i)=>{
       const service=runtime(),profile=data.profiles.find(p=>p.id===worker.profileId)!;
