@@ -1,11 +1,11 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { submitLogin } from './login-submit.js';
 const adminToken = 'e2e-test-operator-only-not-a-production-secret';
 const viewerToken = 'e2e-viewer-read-only-not-a-production-secret';
 const headers = { authorization: `Bearer ${adminToken}` };
 async function login(page: Page, token = adminToken) {
   await page.goto('/'); await page.getByLabel('ログイントークン').fill(token);
-  await page.getByRole('button', { name: 'ログイン', exact: true }).click();
-  await expect(page.locator('.workspace-role')).toHaveText(token === viewerToken ? '閲覧者' : '管理者');
+  await submitLogin(page,token === viewerToken ? '閲覧者' : '管理者');
 }
 async function create(page: Page, title: string) {
   await page.getByRole('button', { name: '新しいセッション', exact: true }).first().click();

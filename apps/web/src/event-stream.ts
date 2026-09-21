@@ -1,9 +1,9 @@
 import type { Snapshot } from '../../../packages/contracts/index.js';
-import { PresentationDispatcher, type PresentationAdapter } from '../../../packages/presentation/index.js';
+import { PresentationDispatcher, type PresentationAdapter, type PresentationEvent } from '../../../packages/presentation/index.js';
 
 /** Public projections are replaceable. Rendering never sends a conversation command or starts a worker. */
 export function subscribeSession(load:()=>Promise<Snapshot>,publish:(snapshot:Snapshot)=>void,status:(text:string)=>void,
-  options:{adapter?:PresentationAdapter;adapterTimeoutMs?:number}={}):()=>void {
+  options:{adapter?:PresentationAdapter;adapterTimeoutMs?:number;onEvent?:(event:PresentationEvent)=>void}={}):()=>void {
   let closed=false,source:EventSource|null=null,retry:ReturnType<typeof setTimeout>|null=null;
   let presentation:PresentationDispatcher|null=null;
   let refreshTimer:ReturnType<typeof setTimeout>|null=null,fetching=false,dirty=false,backoff=1000,generation=0;
@@ -25,7 +25,7 @@ export function subscribeSession(load:()=>Promise<Snapshot>,publish:(snapshot:Sn
     try{
       const snapshot=await load();if(closed||expected!==generation)return;publish(snapshot);
       presentation?.dispose();
-      presentation=new PresentationDispatcher(snapshot.session.id,{handle:requestRefresh},options.adapter,snapshot.cursor,options.adapterTimeoutMs);
+      presentation=new PresentationDispatcher(snapshot.session.id,{handle:event=>{options.onEvent?.(event);requestRefresh();}},options.adapter,snapshot.cursor,options.adapterTimeoutMs);
       source=new EventSource(`/v1/sessions/${snapshot.session.id}/events?cursor=${encodeURIComponent(snapshot.cursor)}`);
       source.onopen=()=>{if(!closed&&expected===generation){backoff=1000;status('接続中');}};
       source.onerror=()=>{if(!closed&&expected===generation)reconnect();};
@@ -38,6 +38,8 @@ export function subscribeSession(load:()=>Promise<Snapshot>,publish:(snapshot:Sn
       };
     }catch{reconnect();}
   };
+  const offline=()=>reconnect();
+  if(typeof window!=='undefined')window.addEventListener('offline',offline);
   void connect();
-  return()=>{closed=true;generation++;source?.close();presentation?.dispose();if(retry)clearTimeout(retry);if(refreshTimer)clearTimeout(refreshTimer);};
+  return()=>{if(typeof window!=='undefined')window.removeEventListener('offline',offline);closed=true;generation++;source?.close();presentation?.dispose();if(retry)clearTimeout(retry);if(refreshTimer)clearTimeout(refreshTimer);};
 }
