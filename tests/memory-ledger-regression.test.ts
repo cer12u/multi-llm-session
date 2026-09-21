@@ -14,7 +14,9 @@ it('R5-PROVENANCE-001: editing a source hides invalidated memory from recall wit
     f.service.changeMessage(f.id, source.id, '本人が訂正した予定は木曜日', randomUUID());
     expect(f.service.pages.memories(agent, '水曜日').items).toHaveLength(0);
     expect(f.store.get('SELECT id FROM memories WHERE id=?', saved.id)).toEqual({ id: saved.id });
-    expect(f.store.get<{ status: string }>('SELECT status FROM memory_records WHERE memory_id=?', saved.id)?.status).toBe('invalid');
+    expect(f.store.get<{ status: string }>('SELECT status FROM memory_metadata WHERE memory_id=?', saved.id)?.status).toBe('INVALID');
+    expect(f.store.get("SELECT id FROM memory_changes WHERE agent_id=? AND kind='SOURCE_INVALIDATED'",agent)).toBeDefined();
+    expect(f.service.workerMemories('worker-0',agent)).toHaveLength(0);
     expect(f.service.snapshot(f.id).messages.find(m => m.id === source.id)?.text).toContain('木曜日');
     expect(JSON.stringify(f.service.exportSession(f.id))).not.toContain('予定は水曜日だった');
   } finally { f.close(); }

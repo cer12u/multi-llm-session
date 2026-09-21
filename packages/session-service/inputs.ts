@@ -39,7 +39,7 @@ export class AgentInputs {
     return this.memoryDue(agent, settings) && this.cursor(agent.id).foreground_runs >= (settings.memoryShareEvery ?? 3);
   }
 
-  /** Build the oldest exact prefix first. Budget the actual request structure BEFORE binding its observation hash. */
+  /** Select mandatory chronological input, relevant memory with originals, then optional recent history. */
   context(agent: AgentRow, input: Context, kind: RunKind, settings: Settings): Context {
     const c = this.cursor(agent.id), memory = kind === 'memory', from = memory ? c.memory_input : c.observed_input;
     const profile=profileOf(agent);
@@ -55,14 +55,16 @@ export class AgentInputs {
     base.messages = []; base.memories = []; base.sources = [];
     if (kind === 'observe' || memory) { base.delta = []; base.candidate = null; base.questions = []; }
     const coverageComplete=base.coverage?.complete;
-    const context: Context = { ...base, historyTruncated:true, progress: this.progress(agent.id, agent.session_id),
+    const context: Context = { ...base, historyTruncated:false, progress: this.progress(agent.id, agent.session_id),
       selection: { omittedRecent: originalMessages.length, omittedMemories: originalMemories.length,
         omittedSources: originalSources.length, reason: 'bounded-before-observation-binding' },
       delivery: { purpose: memory ? 'memory' : 'observation', fromInput: from, throughInput: from,
         targetInput: target, complete: from >= target, entries: [] } };
+    // Reserve bounded diagnostic space before filling the mandatory prefix. These placeholders never leave selection.
+    if(kind!=='observe')context.recall={algorithm:'owner-meaning-v2',selected:[],
+      omittedForBudget:Array.from({length:12},()=> '00000000-0000-4000-8000-000000000000'),candidates:12,additionalCalls:0,elapsedMs:999999999};
     const coverage=()=>{if(context.coverage)context.coverage.complete=!!coverageComplete&&context.delivery!.complete;};
-    coverage();
-    const fits = () => contextFits(context,kind,profile,settings);
+    coverage();const fits = () => contextFits(context,kind,profile,settings);
     ensure(fits(), 422, 'CONTEXT_LIMIT');
     for (const row of rows) {
       const message = row.kind === 'message' ? this.store.get<MessageRow>('SELECT * FROM messages WHERE id=? AND session_id=?', row.entity_id, agent.session_id) : undefined;
@@ -83,30 +85,31 @@ export class AgentInputs {
       }
     }
     const mandatoryMessages = context.messages.length;
-    if (!memory && kind !== 'observe') {
-      for (const m of originalMessages) {
-        if (context.messages.some(v => v.id === m.id)) { context.selection!.omittedRecent--; continue; }
-        context.messages.push(m);
-        if (!fits()) context.messages.pop(); else context.selection!.omittedRecent--;
-      }
-    }
-    // Memory reconciliation sees prior owner interpretations, but never adds newer messages to its acknowledged prefix.
     if(kind!=='observe'){
       context.messages.sort((a,b)=>a.sequence-b.sequence);
-      const started=this.measure(),recalled=this.retriever.search(recallRequest(context,agent.session_id,agent.id,this.now(),memory));
-      context.recall={algorithm:'owner-meaning-v2',selected:[],omittedForBudget:[],candidates:recalled.length,additionalCalls:0,elapsedMs:999999999};
+      const queryContext=(!memory&&!context.messages.length)?{...context,messages:originalMessages}:context;
+      const started=this.measure(),recalled=this.retriever.search(recallRequest(queryContext,agent.session_id,agent.id,this.now(),memory));
+      context.recall={algorithm:'owner-meaning-v2',selected:[],omittedForBudget:recalled.map(row=>row.note.id),candidates:recalled.length,additionalCalls:0,elapsedMs:999999999};
       context.selection!.omittedMemories=recalled.length;
       for(const candidate of recalled){
         const evidence={request:{kind:'memories' as const,query:'automatic related memory',cursor:null},
           messages:candidate.originals.map(this.project),memories:[candidate.note],nextCursor:null};
+        const position=context.recall.omittedForBudget.indexOf(candidate.note.id);
+        context.recall.omittedForBudget.splice(position,1);
         context.memories.push(candidate.note);context.retrieved??=[];context.retrieved.push(evidence);
         context.recall.selected.push({id:candidate.note.id,score:candidate.score,provenance:candidate.provenance});
         if(!fits()){
-          context.memories.pop();context.retrieved.pop();context.recall.selected.pop();context.recall.omittedForBudget.push(candidate.note.id);
+          context.memories.pop();context.retrieved.pop();context.recall.selected.pop();context.recall.omittedForBudget.splice(position,0,candidate.note.id);
         }else context.selection!.omittedMemories--;
       }
       context.recall.elapsedMs=Math.min(999999999,Math.max(0,Math.ceil(this.measure()-started)));
-      if(!memory)for(const source of originalSources){
+    }
+    if(!memory&&kind!=='observe'){
+      for(const m of originalMessages){
+        if(context.messages.some(v=>v.id===m.id)){context.selection!.omittedRecent--;continue;}
+        context.messages.push(m);if(!fits())context.messages.pop();else context.selection!.omittedRecent--;
+      }
+      for(const source of originalSources){
         if(context.sources.some(s=>s.id===source.id)){context.selection!.omittedSources--;continue;}
         context.sources.push(source);if(!fits())context.sources.pop();else context.selection!.omittedSources--;
       }
