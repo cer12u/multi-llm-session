@@ -191,13 +191,14 @@ it('R2-STATE-020: a populated V2 database migrates with notes, IDs, settings and
   const agent = f.service.agents(f.id)[0], memoryId = randomUUID();
   f.store.run('INSERT INTO memories(id,agent_id,text,sources_json,created_at,sequence) VALUES(?,?,?,?,?,?)', memoryId, agent.id, '出典の確度を勝手に昇格しない旧メモ', JSON.stringify([source.id]), f.now(), 1);
   f.store.run('UPDATE agent_instances SET memory_seq=1 WHERE id=?', agent.id);
-  // Build an actual V2 fixture by removing every additive V3/V4 object; this is NOT a rollback procedure.
-  f.store.db.exec(`DROP TRIGGER input_message_insert; DROP TRIGGER input_message_update; DROP TRIGGER input_source_insert;
+  // Build an actual V2 fixture by removing every additive V3/V4/V5 object; this is NOT a rollback procedure.
+  f.store.db.exec(`DROP TABLE agent_agenda_bindings; DROP TABLE agent_agenda_clock; DROP TABLE agent_agenda;
+    DROP TRIGGER input_message_insert; DROP TRIGGER input_message_update; DROP TRIGGER input_source_insert;
     DROP TABLE memory_input_origins; DROP TABLE candidate_state_bindings; DROP TABLE agent_input_receipts;
     DROP TABLE agent_input_cursors; DROP TABLE agent_input_log;
     DROP TABLE agent_state_updates; DROP TABLE agent_private_states; PRAGMA user_version=2;`); f.close();
   const db = new Store(f.config.dbPath); cleanup.push(() => db.close()); const service = new SessionService(db, f.config, f.now);
-  expect(db.db.pragma('user_version', { simple: true })).toBe(4);
+  expect(db.db.pragma('user_version', { simple: true })).toBe(5);
   expect(service.snapshot(f.id).messages[0].id).toBe(source.id);
   expect(service.workerMemories(agent.slot, agent.id)).toHaveLength(1);
   expect(service.workerMemories(agent.slot, agent.id)[0]).toMatchObject({ id: memoryId });
