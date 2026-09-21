@@ -135,16 +135,23 @@ test('viewer UI has no composer, session mutation or private diagnostic controls
   await expect(page.getByRole('button', { name: 'セッションを終了', exact: true })).toHaveCount(0);
 });
 
-test('a lost HTTP response preserves the draft and retries one logical message with the same idempotency key', async ({ page, request }) => {
+test('a lost HTTP response preserves the immutable submission and reconciles one logical message without a new POST', async ({ page, request }) => {
   const id = await fixture(request, '再送の重複防止'); await login(page); await select(page, '再送の重複防止');
   const url = `**/v1/sessions/${id}/messages`, keys: string[] = [];
   await page.route(url, async route => { keys.push(route.request().headers()['idempotency-key']); await route.fetch(); await route.abort('failed'); });
   await input(page).fill('一度だけ確定する発言'); await send(page).click();
   await expect(page.getByRole('alert')).toBeVisible(); await expect(input(page)).toHaveValue('一度だけ確定する発言');
+  await expect(page.locator('.composer-dock .draft-status')).toContainText('結果不明');
+  await expect(send(page)).toBeDisabled();
   await page.unroute(url);
   await page.route(url, async route => { keys.push(route.request().headers()['idempotency-key']); await route.continue(); });
-  await send(page).click(); await expect(input(page)).toHaveValue('');
+  const sentBeforeReconciliation = keys.length;
+  await page.getByRole('button', { name: '元の内容を再送', exact: true }).click();
+  await expect(input(page)).toHaveValue('');
+  await expect(page.locator('.composer-dock .draft-status')).toContainText('確認済み');
   const snapshot = await (await request.get(`/v1/sessions/${id}/snapshot`, { headers })).json();
   expect(snapshot.messages.filter((message: { text: string }) => message.text === '一度だけ確定する発言')).toHaveLength(1);
-  expect(keys.length).toBeGreaterThanOrEqual(3); expect(new Set(keys).size).toBe(1);
+  expect(sentBeforeReconciliation).toBe(2);
+  expect(keys.length).toBe(sentBeforeReconciliation);
+  expect(new Set(keys).size).toBe(1);
 });

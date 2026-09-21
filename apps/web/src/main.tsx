@@ -3,9 +3,11 @@ import { createRoot } from 'react-dom/client';
 import type { Character, PublicMessage, PublicSession, Settings, Snapshot } from '../../../packages/contracts/index.js';
 import { subscribeSession } from './event-stream.js';
 import { activityLabels, agentLabels, lifecycleLabels, preview, timeLabel } from './chat-model.js';
-import { Avatar, Composer, Dialog, emptyDraft, Icon, MessageRow, Timeline, type Draft, type ScrollPosition } from './chat-components.js';
+import { Avatar, Dialog, Icon, MessageRow, Timeline, type ScrollPosition } from './chat-components.js';
 import { ArchiveSession } from './archive-session.js';
 import './archive.css';
+import { PersistentComposer, useDurableDrafts } from './persistent-composer.js';
+import './drafts.css';
 import { CharacterManager } from './character-manager.js';
 import './style.css';
 
@@ -22,7 +24,6 @@ function App() {
   const [characters, setCharacters] = useState<Character[]>([]), [caps, setCaps] = useState<Capabilities | null>(null);
   const [modal, setModal] = useState<Modal>(null), [panel, setPanel] = useState<Panel>(null), [sidebarOpen, setSidebarOpen] = useState(false);
   const [title, setTitle] = useState('自由な会話'), [members, setMembers] = useState<{ characterId: string; profileId: string; slot: string }[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, Draft>>({}), [pending, setPending] = useState<Record<string, boolean>>({});
   const [threadId, setThreadId] = useState<string | null>(null), [jumpId, setJumpId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [, renderArchive] = useState(0);
@@ -33,9 +34,9 @@ function App() {
   const selectedRef = useRef(selected); selectedRef.current = selected;
   const authRef = useRef(auth); authRef.current = auth;
   const authEpoch = useRef(0), currentSnapshot = useRef<Snapshot | null>(null);
-  const requests = useRef(new Map<string, { signature: string; key: string; sending: boolean }>());
   const positions = useRef(new Map<string, ScrollPosition>());
   const operator = auth?.role === 'operator';
+  const vault = useDurableDrafts(operator, api, resetAuth);
   const session = snapshot?.session;
   const mainDraftKey = selected ?? '';
   const archive = selected ? archives.current.get(selected) : undefined;
@@ -53,7 +54,7 @@ function App() {
     for (const value of archives.current.values()) value.dispose(); archives.current.clear();
     authEpoch.current++; selectedRef.current = null; currentSnapshot.current = null;
     setAuth(null); setSelected(null); setSnapshot(null); setSessions([]); setCaps(null); setCharacters([]);
-    setDrafts({}); setPending({}); requests.current.clear(); positions.current.clear(); setModal(null); setPanel(null); setError('');
+    positions.current.clear(); setModal(null); setPanel(null); setError('');
   }
   async function api<T>(path: string, body?: unknown, idem: string = crypto.randomUUID()): Promise<T> {
     const epoch = authEpoch.current;
@@ -67,7 +68,7 @@ function App() {
     }
     if (!response) throw new Error('接続を確認してください。下書きは保持しています。');
     const value = await response.json();
-    if (!response.ok) { if (response.status === 401 && epoch === authEpoch.current) resetAuth(); throw new Error(errorMessages[value.code] ?? value.code ?? `HTTP ${response.status}`); }
+    if (!response.ok) { if (response.status === 401 && epoch === authEpoch.current) resetAuth(); throw Object.assign(new Error(errorMessages[value.code] ?? value.code ?? `HTTP ${response.status}`), { status: response.status, code: value.code }); }
     return value as T;
   }
   function run(operation: () => Promise<void>) {
@@ -136,20 +137,10 @@ function App() {
     update(); const timer = setInterval(update, 1500); return () => { closed = true; clearInterval(timer); };
   }, [panel, selected, operator]);
   useEffect(() => { const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape' && !modal) { setPanel(null); setSidebarOpen(false); } }; window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey); }, [modal]);
-  function updateDraft(key: string, draft: Draft) { setDrafts(values => ({ ...values, [key]: draft })); }
-  async function send(key: string, replyTo: string | null) {
-    const id = selectedRef.current, draft = drafts[key] ?? emptyDraft, epoch = authEpoch.current;
-    if (!id || !draft.text.trim() || requests.current.get(key)?.sending) return;
-    const body = { text: draft.text, replyTo, addressedTo: draft.addressedTo ? [draft.addressedTo] : [] };
-    const signature = JSON.stringify(body), previous = requests.current.get(key);
-    const request = previous?.signature === signature ? previous : { signature, key: crypto.randomUUID(), sending: false };
-    request.sending = true; requests.current.set(key, request); setPending(values => ({ ...values, [key]: true }));
-    try {
-      await api(`/v1/sessions/${id}/messages`, body, request.key);
-      if (epoch !== authEpoch.current) return;
-      setDrafts(values => values[key]?.text === draft.text && values[key]?.addressedTo === draft.addressedTo ? { ...values, [key]: { ...emptyDraft, addressedTo: draft.addressedTo } } : values);
-      requests.current.delete(key); await refresh(id);
-    } finally { request.sending = false; if (epoch === authEpoch.current) setPending(values => ({ ...values, [key]: false })); }
+  async function logout() {
+    let warning='';
+    try { await vault?.clear(); } catch { warning='端末の下書きを削除できませんでした。共有端末ではブラウザーのサイトデータを削除してください。'; }
+    try { await api('/v1/auth/logout', {}); } finally { resetAuth(); if(warning)setError(warning); }
   }
   async function control(action: 'start' | 'pause' | 'resume' | 'end') {
     const id = selectedRef.current; if (!id) return;
@@ -191,10 +182,10 @@ function App() {
       <aside className={`session-sidebar${sidebarOpen ? ' open' : ''}`} aria-label="ワークスペース"><div className="sidebar-heading"><div><strong>会話ワークスペース</strong><small>独立したキャラクターのセッション</small></div>{operator && <button className="icon-button" aria-label="新しいセッション" title="新しいセッション" onClick={() => { setModal('create'); setSidebarOpen(false); }} disabled={!caps}><Icon name="plus" /></button>}</div>
         <div className="channel-list-heading"><span>セッション</span><button className="text-button" onClick={() => run(() => refresh())}>更新</button></div>
         <nav aria-label="セッション一覧">{sessions.map(item => <button key={item.id} className={`channel-item${selected === item.id ? ' selected' : ''}`} aria-current={selected === item.id ? 'page' : undefined} onClick={() => { if (selected !== item.id) selectSession(item.id); else setSidebarOpen(false); }}>
-          <span className="hash">#</span><span className="channel-copy"><strong>{item.title}</strong><small><span className={`state-dot ${item.lifecycle.toLowerCase()}`} />{lifecycleLabels[item.lifecycle]} · {item.mode === 'mock' ? '模擬' : '実モデル'}{drafts[item.id]?.text ? ' · 下書き' : ''}</small></span><span className="post-count" title="Agentの累計発言数">{item.botMessages}</span>
+          <span className="hash">#</span><span className="channel-copy"><strong>{item.title}</strong><small><span className={`state-dot ${item.lifecycle.toLowerCase()}`} />{lifecycleLabels[item.lifecycle]} · {item.mode === 'mock' ? '模擬' : '実モデル'}{vault?.draft(item.id).text ? ' · 下書き' : ''}</small></span><span className="post-count" title="Agentの累計発言数">{item.botMessages}</span>
         </button>)}</nav>{!sessions.length && <p className="sidebar-empty">まだセッションがありません。</p>}
         {operator && <button className="new-channel" onClick={() => { setModal('create'); setSidebarOpen(false); }} disabled={!caps}><Icon name="plus" />セッションを追加</button>}
-        <div className="sidebar-footer">{operator && <button onClick={() => { setModal('characters'); setSidebarOpen(false); }}><Icon name="users" />キャラクターを管理</button>}<button onClick={() => run(async () => { await api('/v1/auth/logout', {}); resetAuth(); })}>ログアウト</button><small>専用アプリ · 外部チャットへの接続なし</small></div>
+        <div className="sidebar-footer">{operator && <button onClick={() => { setModal('characters'); setSidebarOpen(false); }}><Icon name="users" />キャラクターを管理</button>}<button onClick={() => run(logout)}>ログアウト</button><small>ログアウトでこの端末の下書き・再送状態を削除します。</small></div>
       </aside>
       <div className={`session-workspace${panel ? ' with-panel' : ''}`}><main className="chat-main">{snapshot && session ? <>
         <header className="channel-header"><div className="channel-title"><h1><span>#</span> {session.title}</h1><p><span className={`state-dot ${session.lifecycle.toLowerCase()}`} />{lifecycleLabels[session.lifecycle]}<span className="connection"> · {connection}</span></p></div><div className="channel-header-actions"><button className="member-button" aria-label="参加者" title="参加者" onClick={() => openPanel('members')}><span className="avatar-stack">{snapshot.agents.slice(0, 3).map(agent => <Avatar key={agent.id} id={agent.characterId} name={agent.name} small />)}</span><span>{snapshot.agents.length}</span></button>{operator && <>{session.lifecycle === 'DRAFT' && <button className="primary compact-button" onClick={() => run(() => control('start'))}>開始</button>}{session.lifecycle === 'RUNNING' && <button className="compact-button" onClick={() => run(() => control('pause'))}>一時停止</button>}{session.lifecycle === 'PAUSED' && <button className="primary compact-button" onClick={() => run(() => control('resume'))}>再開</button>}</>}<button className="icon-button" aria-label="セッション設定" onClick={() => openPanel('settings')}><Icon name="settings" /></button></div></header>
@@ -202,10 +193,10 @@ function App() {
         <div className="archive-toolbar">{archive?.historyCursor ? <button disabled={archive.historyBusy} onClick={() => run(() => archive.loadOlder())}>{archive.historyBusy ? '履歴を取得中' : '以前の発言を読み込む'}</button> : <span>履歴の先頭です</span>}{archive?.historyError && <><span role="alert">{archive.historyError}</span><button onClick={() => run(() => archive.resynchronize())}>履歴を再同期</button></>}</div>
         <Timeline key={session.id} sessionId={session.id} title={session.title} messages={archive?.messages ?? snapshot.messages} reply={openThread} navigate={id => run(() => jump(id))} remove={operator && session.lifecycle !== 'ENDED' ? message => { setDeleting(message); setModal('delete'); } : undefined} jumpId={jumpId} positions={positions.current} />
         <div className="conversation-status" role="status">{session.stopReason ? `停止理由：${session.stopReason}` : session.lifecycle !== 'RUNNING' ? (session.lifecycle === 'DRAFT' ? '開始前です。話題を先に入力できます。' : session.lifecycle === 'PAUSED' ? 'Agentは一時停止中です。人間の発言は追加できます。' : 'このセッションは終了しました。履歴は引き続き参照できます。') : snapshot.agents.filter(agent => ['thinking', 'reviewing', 'remembering'].includes(agent.status)).map(agent => `${agent.name}：${agentLabels[agent.status]}`).join(' ／ ') || activityLabels[session.activity]}</div>
-        <div className="composer-dock">{operator && session.lifecycle !== 'ENDED' ? <Composer key={mainDraftKey} title={session.title} draft={drafts[mainDraftKey] ?? emptyDraft} change={draft => updateDraft(mainDraftKey, draft)} send={() => run(() => send(mainDraftKey, null))} pending={!!pending[mainDraftKey]} agents={snapshot.agents} /> : <div className="read-only-note">{operator ? '終了した会話は読み取り専用です。' : '閲覧モード · メッセージの投稿や会話制御はできません。'}</div>}</div>
+        <div className="composer-dock">{operator && (session.lifecycle !== 'ENDED' || !!vault?.draft(mainDraftKey).text || vault?.status(mainDraftKey).unknown) ? <PersistentComposer key={mainDraftKey} controller={vault} draftKey={mainDraftKey} title={session.title} agents={snapshot.agents} perform={run} afterSend={() => refresh(session.id)} lockedReason={session.lifecycle === 'ENDED' ? '終了したセッションでは送信できません。' : undefined} /> : <div className="read-only-note">{operator ? '終了した会話は読み取り専用です。' : '閲覧モード · メッセージの投稿や会話制御はできません。'}</div>}</div>
       </> : <div className="workspace-empty"><span className="large-hash">#</span><h1>{selected ? '会話を読み込んでいます' : '新しい会話をはじめる'}</h1><p>{selected ? connection : '左側からセッションを選ぶか、キャラクターを選んで会話スペースを作成します。'}</p>{!selected && operator && <button className="primary" disabled={!caps} onClick={() => setModal('create')}>新しいセッション</button>}<small>現在は実験用アプリです。UIの動作確認と、実LLMの会話検証は別です。</small></div>}</main>
       {panel && snapshot && session && <aside className="detail-panel" aria-label={panelTitles[panel]}><div className="panel-heading"><h2>{panelTitles[panel]}</h2><button className="icon-button" aria-label="パネルを閉じる" onClick={() => setPanel(null)}><Icon name="close" /></button></div>
-        {panel === 'thread' ? <><p className="panel-context"># {session.title}<small>同じセッションの公開会話です。返信も全Agentに共有されます。</small></p><div className="thread-messages">{thread.map(message => <MessageRow key={message.id} message={message} />)}{archive?.threadBusy && <p role="status">返信を取得中</p>}{archive?.threadError && <p role="alert">{archive.threadError}</p>}{archive?.threadCursor && <button disabled={archive.threadBusy} onClick={() => void archive.openThread(root ?? threadId!, true)}>返信の続きを読み込む</button>}{!archive?.threadBusy && !archive?.threadCursor && <p className="muted">返信の末尾です。</p>}</div>{operator && root && thread.length > 0 && !thread[0].deleted && session.lifecycle !== 'ENDED' && <div className="thread-composer"><Composer key={replyDraftKey} thread title={session.title} draft={drafts[replyDraftKey] ?? emptyDraft} change={draft => updateDraft(replyDraftKey, draft)} send={() => run(() => send(replyDraftKey, root))} pending={!!pending[replyDraftKey]} agents={snapshot.agents} /></div>}</> : <div className="panel-content">
+        {panel === 'thread' ? <><p className="panel-context"># {session.title}<small>同じセッションの公開会話です。返信も全Agentに共有されます。</small></p><div className="thread-messages">{thread.map(message => <MessageRow key={message.id} message={message} />)}{archive?.threadBusy && <p role="status">返信を取得中</p>}{archive?.threadError && <p role="alert">{archive.threadError}</p>}{archive?.threadCursor && <button disabled={archive.threadBusy} onClick={() => void archive.openThread(root ?? threadId!, true)}>返信の続きを読み込む</button>}{!archive?.threadBusy && !archive?.threadCursor && <p className="muted">返信の末尾です。</p>}</div>{operator && root && thread.length > 0 && (session.lifecycle !== 'ENDED' || !!vault?.draft(replyDraftKey).text || vault?.status(replyDraftKey).unknown) && <div className="thread-composer"><PersistentComposer key={replyDraftKey} controller={vault} draftKey={replyDraftKey} thread title={session.title} agents={snapshot.agents} perform={run} afterSend={() => refresh(session.id)} lockedReason={thread[0].deleted ? '返信元は削除済みです。' : session.lifecycle === 'ENDED' ? '終了したセッションでは送信できません。' : undefined} /></div>}</> : <div className="panel-content">
           {panel === 'members' && <><p className="muted">キャラクター定義と、今回のセッションの参加Agentは別に保持されます。</p>{snapshot.agents.map(agent => <div className="member-row" key={agent.id}><Avatar id={agent.characterId} name={agent.name} /><div><strong>{agent.name}</strong><small>{agentLabels[agent.enabled ? agent.status : 'disabled'] ?? agent.status}</small><small>定義 v{agent.characterVersion} · {agent.profileId}</small></div>{operator && session.lifecycle !== 'ENDED' && <button className="text-button" onClick={() => run(async () => { await api(`/v1/sessions/${session.id}/members`, { agentId: agent.id, enabled: !agent.enabled }); await refresh(session.id); })}>{agent.enabled ? '停止' : '有効化'}</button>}</div>)}</>}
           {panel === 'search' && <><form className="search-form" onSubmit={event => { event.preventDefault(); if (archive) void archive.search(search); }}>
             <label>検索語<input autoFocus value={search} onChange={event => { setSearch(event.target.value); archive?.changeQuery(); }} required maxLength={200} placeholder="このセッションの発言を検索" /></label><button className="primary" disabled={searchBusy}>{searchBusy ? '検索中' : '検索'}</button></form>
