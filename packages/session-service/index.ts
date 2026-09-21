@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { AgentAgenda } from './agenda.js';
+import { MemoryLedger, memoryNote, memoriesCurrent, currentMemoryPredicate, type MemoryRow } from './memory-ledger.js';
+import { boundedContext } from '../models/context-budget.js';
 import { AgentInputs } from './inputs.js';
 import { PrivateStates } from './private-state.js';
 import { ArchivePages } from './pages.js';
@@ -29,6 +31,7 @@ export class SessionService {
   private readonly privateStates: PrivateStates;
   private readonly inputs: AgentInputs;
   private readonly agenda: AgentAgenda;
+  private readonly memoryLedger: MemoryLedger;
   constructor(readonly store: Store, readonly config: Config, readonly now: () => number = Date.now,
     readonly random: () => number = Math.random) {
     this.pages = new ArchivePages(store, row => this.publicMessage(row));
@@ -36,6 +39,7 @@ export class SessionService {
     this.privateStates = new PrivateStates(store, now);
     this.inputs = new AgentInputs(store, now, row => this.publicMessage(row));
     this.agenda = new AgentAgenda(store, now);
+    this.memoryLedger = new MemoryLedger(store, now);
     this.changes.setMaxListeners(100);
     store.tx(() => {
       for (const slot of Object.keys(config.workerTokens)) store.run('INSERT OR IGNORE INTO workers(slot) VALUES(?)', slot);
@@ -298,7 +302,7 @@ export class SessionService {
       this.store.run("UPDATE agent_input_log SET created_at=? WHERE session_id=? AND kind='message' AND entity_id=? AND version=?",this.now(),session,messageId,s.revision+1);
       this.privateStates.invalidateMessage(session,messageId);
       this.store.run('DELETE FROM messages_fts WHERE message_id=?',messageId);
-      this.store.run('DELETE FROM memories WHERE EXISTS (SELECT 1 FROM json_each(memories.sources_json) WHERE value=?)',messageId);
+      this.privateStates.invalidateMemories(session,this.memoryLedger.invalidateMessage(session,messageId));
       if(text!==null) this.store.run('INSERT INTO messages_fts(message_id,session_id,text) VALUES(?,?,?)',messageId,session,text);
       for(const a of this.agents(session)) this.wake(a.id,'EDIT');
       this.emit(session,text===null?'message.deleted':'message.updated',{messageId});
@@ -462,7 +466,7 @@ export class SessionService {
         if(request.kind==='message') return {request,messages:[this.archiveMessage(r.session_id,request.query)],memories:[],nextCursor:null};
         if(request.kind==='memories') {
           const page=this.pages.memories(r.agent_id,request.query,{limit:2,cursor:request.cursor});
-          const sources=[...new Set(page.items.flatMap(x=>x.sourceMessageIds))].slice(0,4);
+          const sources=[...new Set(page.items.flatMap(x=>x.sourceMessageIds))];
           return {request,memories:page.items,messages:sources.map(x=>this.archiveMessage(r.session_id,x)),nextCursor:page.nextCursor};
         }
         const page=this.pages.search(r.session_id,request.query,{limit:2,cursor:request.cursor});
@@ -472,7 +476,8 @@ export class SessionService {
       ensure(context.self.privateState?.version===this.privateStates.read(r.agent_id,r.session_id).version,409,'STALE_PRIVATE_STATE');
       context.retrieved=[...(context.retrieved??[]),...results];
       ensure(JSON.stringify(context.retrieved).length<=settingsOf(this.session(r.session_id)).contextChars,422,'LOOKUP_CONTEXT_LIMIT');
-      context=this.privateStates.prepare(this.agent(r.agent_id),context);
+      const owner=this.agent(r.agent_id);
+      context=this.privateStates.prepare(owner,boundedContext(context,r.kind,profileOf(owner),settingsOf(this.session(r.session_id))));
       this.store.run('UPDATE runs SET context_json=?,retrieval_count=retrieval_count+1 WHERE id=?',JSON.stringify(context),id);
       this.trace(r.session_id,r.agent_id,id,'ARCHIVE_RETRIEVED',{requests:requests.length}); return context;
     });
@@ -526,24 +531,20 @@ export class SessionService {
             ready?'READY':'NEEDS_REVIEW',r.snapshot_revision,r.wake_seq,notBefore,this.now()+st.reviewTtlMs,c.id);
         }
         this.trace(s.id,a.id,id,'REVIEW_'+result.decision,{from:c.reviewed_revision,to:r.snapshot_revision,stale:!ready});
-      } else {
+      } else MemorySchema.parse(action);
+      ensure(memoriesCurrent(this.store,r),409,'STALE_MEMORY_EVIDENCE');
+      const stateResult=this.privateStates.complete(r,statePatch);
+      if(r.kind==='memory'){
         const result=MemorySchema.parse(action);
-        for(const note of result.notes) {
-          const evidence=this.inputs.validateMemory(r,note.sourceMessageIds);
-          const sources=JSON.stringify([...new Set(note.sourceMessageIds)].sort());
-          if(!this.store.get('SELECT id FROM memories WHERE agent_id=? AND text=? AND sources_json=?',a.id,note.text,sources)) {
-            this.store.run('UPDATE agent_instances SET memory_seq=memory_seq+1 WHERE id=?',a.id);
-            const sequence=this.store.get<{memory_seq:number}>('SELECT memory_seq FROM agent_instances WHERE id=?',a.id)!.memory_seq;
-            const memoryId=randomUUID();
-            this.store.run('INSERT INTO memories(id,agent_id,text,sources_json,created_at,sequence) VALUES(?,?,?,?,?,?)',memoryId,a.id,note.text,sources,this.now(),sequence);
-            this.store.run('INSERT INTO memory_input_origins(memory_id,run_id,evidence_json) VALUES(?,?,?)',memoryId,r.id,JSON.stringify(evidence));
-          }
-        }
+        const invalidated=this.memoryLedger.save(r,result);
+        this.privateStates.invalidateMemories(s.id,invalidated);
+        const finalVersion=this.privateStates.read(a.id,s.id).version;
+        stateResult.changed ||= finalVersion!==stateResult.version;stateResult.version=finalVersion;
         const supplied=(JSON.parse(r.context_json) as Context).messages;
         this.store.run('UPDATE agent_instances SET memory_revision=MAX(memory_revision,?) WHERE id=?',Math.max(0,...supplied.map(m=>m.revision)),a.id);
-        this.trace(s.id,a.id,id,'MEMORY_SAVED',{notes:result.notes.length});
+        if(result.notes.length||(result.changes?.length??0)>0)this.store.run("UPDATE candidates SET state='NEEDS_REVIEW',reason='MEMORY_CHANGED' WHERE agent_id=? AND state='READY'",a.id);
+        this.trace(s.id,a.id,id,'MEMORY_SAVED',{notes:result.notes.length,changes:result.changes?.length??0,invalidated:invalidated.length});
       }
-      const stateResult=this.privateStates.complete(r,statePatch);
       this.trace(s.id,a.id,id,'PRIVATE_STATE_APPLIED',stateResult);
       this.inputs.complete(r);
       this.agenda.complete(r);
@@ -653,14 +654,14 @@ export class SessionService {
       }
     });
   }
-  workerMemories(slot: string, agentId: string): {id:string;text:string;sourceMessageIds:string[]}[] {
+  workerMemories(slot: string, agentId: string) {
     const a=this.agent(agentId); ensure(a.slot===slot,403,'PRIVATE_STATE_FORBIDDEN');
-    return this.store.all<{id:string;text:string;sources_json:string}>('SELECT * FROM memories WHERE agent_id=? ORDER BY created_at,rowid',agentId)
-      .map(m=>({id:m.id,text:m.text,sourceMessageIds:JSON.parse(m.sources_json) as string[]}))
-      .filter(m=>m.sourceMessageIds.every(id=>!!this.store.get('SELECT id FROM messages WHERE id=? AND session_id=? AND deleted=0',id,a.session_id)));
+    return this.store.all<MemoryRow>(`SELECT m.* FROM memories m WHERE m.agent_id=? AND ${currentMemoryPredicate()} ORDER BY m.created_at,m.rowid`,agentId)
+      .map(m=>memoryNote(this.store,m));
   }
   archiveMessage(session: string, id: string): PublicMessage {
-    this.session(session); const m=this.store.get<MessageRow>('SELECT * FROM messages WHERE id=? AND session_id=?',id,session);
+    this.session(session);
+    const m=this.store.get<MessageRow>('SELECT * FROM messages WHERE id=? AND session_id=?',id,session);
     ensure(m,404,'MESSAGE_NOT_FOUND'); ensure(!m.deleted,410,'MESSAGE_DELETED'); return this.publicMessage(m);
   }
   searchArchive(session: string, query: string): PublicMessage[] {
