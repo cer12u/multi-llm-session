@@ -4,6 +4,7 @@ import type { Character, PublicMessage, PublicSession, Settings, Snapshot } from
 import { subscribeSession } from './event-stream.js';
 import { activityLabels, agentLabels, lifecycleLabels, preview, rootMessageId, threadMessages, timeLabel } from './chat-model.js';
 import { Avatar, Composer, Dialog, emptyDraft, Icon, MessageRow, Timeline, type Draft, type ScrollPosition } from './chat-components.js';
+import { CharacterManager } from './character-manager.js';
 import './style.css';
 
 type Auth = { role: 'operator' | 'viewer'; csrf: string };
@@ -22,7 +23,7 @@ function App() {
   const [drafts, setDrafts] = useState<Record<string, Draft>>({}), [pending, setPending] = useState<Record<string, boolean>>({});
   const [threadId, setThreadId] = useState<string | null>(null), [jumpId, setJumpId] = useState<string | null>(null);
   const [search, setSearch] = useState(''), [results, setResults] = useState<PublicMessage[] | null>(null), [searchBusy, setSearchBusy] = useState(false);
-  const [sourceTitle, setSourceTitle] = useState(''), [sourceText, setSourceText] = useState(''), [settingsText, setSettingsText] = useState(''), [importText, setImportText] = useState('');
+  const [sourceTitle, setSourceTitle] = useState(''), [sourceText, setSourceText] = useState(''), [settingsText, setSettingsText] = useState('');
   const [diagnostic, setDiagnostic] = useState<unknown>(null), [connection, setConnection] = useState('接続準備中'), [saving, setSaving] = useState(false), [deleting, setDeleting] = useState<PublicMessage | null>(null);
   const selectedRef = useRef(selected); selectedRef.current = selected;
   const authRef = useRef(auth); authRef.current = auth;
@@ -77,6 +78,11 @@ function App() {
   function selectSession(id: string) {
     selectedRef.current = id; currentSnapshot.current = null; searchGeneration.current++;
     setSelected(id); setSnapshot(null); setPanel(null); setThreadId(null); setJumpId(null); setResults(null); setSearch(''); setSearchBusy(false); setSourceTitle(''); setSourceText(''); setDiagnostic(null); setSidebarOpen(false);
+  }
+  async function refreshCharacters() {
+    const epoch = authEpoch.current;
+    const definitions = await api<Character[]>('/v1/characters');
+    if (epoch === authEpoch.current) setCharacters(definitions);
   }
   async function initialize() {
     const epoch = authEpoch.current;
@@ -184,7 +190,7 @@ function App() {
       </div>
     </div>
     {modal === 'create' && <Dialog error={error} title="新しいセッション" close={() => setModal(null)}>{createForm}</Dialog>}
-    {modal === 'characters' && <Dialog error={error} title="キャラクターを管理" close={() => setModal(null)}><div className="character-list">{characters.map(character => <div className="member-row" key={character.id}><Avatar id={character.id} name={character.name} /><div><strong>{character.name}</strong><small>{character.id} · v{character.version}</small></div></div>)}</div><details><summary>JSON定義を追加・更新</summary><p className="muted">更新には新しいversionを使います。既存セッションの人格は変わりません。画像・音声連携は未実装です。</p><label>キャラクター定義<textarea className="settings-editor" value={importText} onChange={event => setImportText(event.target.value)} placeholder='{"schemaVersion":1,"id":"example","version":1,"name":"名前","persona":"設定","presentationRef":null}' /></label><button onClick={() => run(async () => { await api('/v1/characters', JSON.parse(importText)); setImportText(''); await initialize(); })}>定義を保存</button></details></Dialog>}
+    {modal === 'characters' && operator && <Dialog error={error} title="キャラクターを管理" close={() => setModal(null)}><CharacterManager characters={characters} participants={snapshot?.agents ?? []} api={api} refresh={refreshCharacters} /></Dialog>}
     {modal === 'end' && session && <Dialog error={error} title="セッションを終了しますか？" close={() => setModal(null)}><p>「{session.title}」のAgentを停止し、会話を読み取り専用にします。再開したい場合は終了ではなく一時停止を使ってください。</p><div className="form-actions"><button onClick={() => setModal(null)}>キャンセル</button><button className="danger-button" onClick={() => run(async () => { await control('end'); setModal(null); })}>終了する</button></div></Dialog>}
     {modal === 'delete' && deleting && <Dialog error={error} title="この発言を削除しますか？" close={() => setModal(null)}><blockquote>{preview(deleting)}</blockquote><p className="muted">公開履歴から本文を削除します。過去の内部実行記録やバックアップからの完全消去ではありません。</p><div className="form-actions"><button onClick={() => setModal(null)}>キャンセル</button><button className="danger-button" onClick={() => run(async () => { await api(`/v1/sessions/${deleting.sessionId}/messages/${deleting.id}`, { text: null }); await refresh(deleting.sessionId); setModal(null); setDeleting(null); })}>削除する</button></div></Dialog>}
   </div>;
