@@ -4,13 +4,13 @@ import { MemoryChangeSchema, type MemoryChange, type MemoryMeaning, type MemoryP
 import type { Store, RunRow, MessageRow } from '../storage-sqlite/index.js';
 
 type Ref={kind:'message';id:string;version:number};
-type Row={id:string;agent_id:string;text:string;sources_json:string;created_at:number;sequence:number};
+export type MemoryRow={id:string;agent_id:string;text:string;sources_json:string;created_at:number;sequence:number};
 type Meta={memory_id:string;status:MemoryStatus;meaning_json:string|null;evidence_json:string|null;reason:string|null};
-export const normalizeMemory=(text:string)=>text.normalize('NFKC').toLocaleLowerCase('ja').replace(/[\p{P}\p{Z}\s]+/gu,' ').trim();
+export const normalizeMemory=(text:string)=>text.normalize('NFKC').toLocaleLowerCase('ja').replace(/[\p{Z}\s]+/gu,' ').trim();
 const sameMeaning=(a:MemoryMeaning,b:MemoryMeaning)=>a.subjectId===b.subjectId&&normalizeMemory(a.key)===normalizeMemory(b.key);
 const overlaps=(a:MemoryMeaning,b:MemoryMeaning)=>(a.validFrom??0)<(b.validTo??Infinity)&&(b.validFrom??0)<(a.validTo??Infinity);
 
-/** Shared by automatic recall, LOOKUP and private paging. History stays in the base tables. */
+/** Shared by automatic recall, LOOKUP and private paging. Audit history remains in the base tables. */
 export function currentMemoryPredicate(alias='m'):string {
   if(!/^[a-z]+$/.test(alias))throw new Error('INVALID_SQL_ALIAS');
   return `NOT EXISTS (SELECT 1 FROM memory_metadata mm WHERE mm.memory_id=${alias}.id AND mm.status IN ('SUPERSEDED','INVALID'))
@@ -26,7 +26,7 @@ export function currentMemoryPredicate(alias='m'):string {
       (SELECT 1 FROM messages msg WHERE msg.id=json_extract(ev.value,'$.id') AND msg.deleted=0
         AND msg.revision=json_extract(ev.value,'$.version')))`;
 }
-export function memoryNote(store:Store,row:Row):MemoryNote {
+export function memoryNote(store:Store,row:MemoryRow):MemoryNote {
   const meta=store.get<Meta>('SELECT * FROM memory_metadata WHERE memory_id=?',row.id);
   const origin=meta?.evidence_json??store.get<{evidence_json:string}>('SELECT evidence_json FROM memory_input_origins WHERE memory_id=?',row.id)?.evidence_json;
   const provenance:MemoryProvenance={status:meta?.status??'ACTIVE',meaning:meta?.meaning_json?JSON.parse(meta.meaning_json):null,
@@ -35,8 +35,17 @@ export function memoryNote(store:Store,row:Row):MemoryNote {
     independentSupport:null};
   return {id:row.id,text:row.text,sourceMessageIds:JSON.parse(row.sources_json),provenance};
 }
+/** Status/meaning changes also fence an older request even when its original messages still exist. */
+export function memoriesCurrent(store:Store,run:RunRow):boolean{
+  const context=JSON.parse(run.context_json) as Context;
+  for(const note of [...context.memories,...(context.retrieved??[]).flatMap(r=>r.memories)]){
+    const row=store.get<MemoryRow>(`SELECT m.* FROM memories m WHERE m.id=? AND m.agent_id=? AND ${currentMemoryPredicate()}`,note.id,run.agent_id);
+    if(!row||JSON.stringify(memoryNote(store,row))!==JSON.stringify(note))return false;
+  }
+  return true;
+}
 
-/** Called only by SessionService's existing result/edit transaction; no new write endpoint. */
+/** Runs only in SessionService's existing result/edit transaction. No new write endpoint. */
 export class MemoryLedger {
   constructor(private readonly store:Store,private readonly now:()=>number){}
   private transaction(){ensure(this.store.db.inTransaction,500,'MEMORY_TRANSACTION_REQUIRED');}
@@ -47,8 +56,8 @@ export class MemoryLedger {
     this.store.run(`INSERT INTO memory_metadata(memory_id,status,reason) VALUES(?,?,?)
       ON CONFLICT(memory_id) DO UPDATE SET status=excluded.status,reason=excluded.reason`,id,state,reason);
   }
-  private row(id:string,owner:string):Row{
-    const row=this.store.get<Row>('SELECT * FROM memories WHERE id=? AND agent_id=?',id,owner);
+  private row(id:string,owner:string):MemoryRow{
+    const row=this.store.get<MemoryRow>('SELECT * FROM memories WHERE id=? AND agent_id=?',id,owner);
     ensure(row,422,'MEMORY_OWNER_MISMATCH');return row;
   }
   private current(id:string,owner:string){ensure(this.store.get(`SELECT m.id FROM memories m WHERE m.id=? AND m.agent_id=? AND ${currentMemoryPredicate()}`,id,owner),422,'MEMORY_NOT_CURRENT');}
@@ -62,7 +71,7 @@ export class MemoryLedger {
       return {kind:'message',id,version:current.revision};
     });
   }
-  private observed(run:RunRow,ids:string[]):Row[]{
+  private observed(run:RunRow,ids:string[]):MemoryRow[]{
     const context=JSON.parse(run.context_json) as Context;
     const supplied=new Set([...context.memories,...(context.retrieved??[]).flatMap(r=>r.memories)].map(m=>m.id));
     ensure(new Set(ids).size===ids.length,422,'DUPLICATE_MEMORY_TARGET');
@@ -78,6 +87,15 @@ export class MemoryLedger {
     this.store.run('INSERT INTO memory_input_origins(memory_id,run_id,evidence_json) VALUES(?,?,?)',id,run.id,JSON.stringify(refs));
     for(const parent of new Set(parents))this.store.run('INSERT INTO memory_edges(parent_id,child_id) VALUES(?,?)',parent,id);
     return id;
+  }
+  private invalidateDescendants(owner:string,parents:string[],except:string):string[]{
+    if(!parents.length)return [];
+    const rows=this.store.all<{id:string}>(`WITH RECURSIVE affected(id) AS (
+      SELECT child_id FROM memory_edges WHERE parent_id IN (SELECT value FROM json_each(?)) AND child_id!=?
+      UNION SELECT e.child_id FROM memory_edges e JOIN affected p ON p.id=e.parent_id WHERE e.child_id!=?)
+      SELECT m.id FROM memories m JOIN affected x ON x.id=m.id WHERE m.agent_id=?`,JSON.stringify(parents),except,except,owner);
+    for(const row of rows){this.status(row.id,'INVALID','PARENT_RECONCILED');this.journal(owner,null,'PARENT_INVALIDATED',[row.id],null);}
+    return rows.map(row=>row.id);
   }
   save(run:RunRow,result:{notes:{text:string;sourceMessageIds:string[]}[];changes?:MemoryChange[]}):string[]{
     this.transaction();const invalidated:string[]=[];
@@ -95,35 +113,35 @@ export class MemoryLedger {
       }
       const explicit=this.observed(run,change.targets),parents=this.observed(run,change.parents);
       for(const target of explicit){const meta=memoryNote(this.store,target).provenance?.meaning;ensure(meta&&sameMeaning(meta,meaning),422,'MEMORY_TARGET_MEANING_MISMATCH');}
-      const active=this.store.all<Row>(`SELECT m.* FROM memories m WHERE m.agent_id=? AND ${currentMemoryPredicate()}`,run.agent_id);
+      const active=this.store.all<MemoryRow>(`SELECT m.* FROM memories m WHERE m.agent_id=? AND ${currentMemoryPredicate()}`,run.agent_id);
       const matching=active.filter(row=>{const old=memoryNote(this.store,row).provenance?.meaning;return !!old&&sameMeaning(old,meaning)&&overlaps(old,meaning);});
       const equivalent=matching.filter(row=>{const old=memoryNote(this.store,row).provenance!.meaning!;return normalizeMemory(old.value)===normalizeMemory(meaning.value)&&old.epistemic===meaning.epistemic&&old.validFrom===meaning.validFrom&&old.validTo===meaning.validTo;});
-      // An unseen equivalent is not silently rewritten. The next memory request recalls it for explicit reconciliation.
-      const visible=new Set((JSON.parse(run.context_json) as Context).memories.map(m=>m.id));
-      ensure(equivalent.every(row=>visible.has(row.id)||explicit.some(x=>x.id===row.id)),422,'UNOBSERVED_MEMORY_DUPLICATE');
+      // Core canonical-key dedup is not a claim that this model request observed all matching old notes.
+      // Explicit model targets/parents always require the exact supplied IDs above.
       const replace=[...new Map([...explicit,...equivalent].map(row=>[row.id,row])).values()];
       if(change.operation==='merge')ensure(replace.every(row=>normalizeMemory(memoryNote(this.store,row).provenance!.meaning!.value)===normalizeMemory(meaning.value)),422,'MEMORY_MERGE_VALUE_MISMATCH');
-      const correction=change.operation==='correct'&&meaning.epistemic==='self_report'&&replace.every(row=>change.sourceMessageIds.some(id=>!JSON.parse(row.sources_json).includes(id)));
+      const correction=change.operation==='correct'&&meaning.epistemic==='self_report'&&explicit.every(row=>change.sourceMessageIds.some(id=>!JSON.parse(row.sources_json).includes(id)));
       const conflicts=matching.filter(row=>!equivalent.some(x=>x.id===row.id)&&!(correction&&explicit.some(x=>x.id===row.id)));
       const state:MemoryStatus=change.operation==='conflict'||(change.operation==='correct'&&!correction)||conflicts.length>0?'CONFLICT':'ACTIVE';
       const merge=change.operation==='merge'||equivalent.length>0;
       const sourceParents=merge?[...parents,...equivalent,...(change.operation==='merge'?explicit:[])]:parents;
       for(const parent of sourceParents){
         const inherited=memoryNote(this.store,parent).provenance?.evidence;
-        // Do not fabricate historic versions for pre-versioned notes.
         ensure(inherited,422,'MEMORY_PARENT_VERSION_UNKNOWN');refs.push(...inherited);
       }
       const id=this.insert(run,change.text,refs,meaning,sourceParents.map(p=>p.id),state);
       const superseded=replace.filter(row=>equivalent.some(x=>x.id===row.id)||change.operation==='merge'||(correction&&explicit.some(x=>x.id===row.id)));
-      for(const row of superseded){this.status(row.id,'SUPERSEDED','RECONCILED');invalidated.push(row.id);}
-      for(const row of [...conflicts,...(!correction&&change.operation==='correct'?explicit:[])])this.status(row.id,'CONFLICT','CONFLICTING_INTERPRETATION');
+      const changed=new Set<string>();
+      for(const row of superseded){this.status(row.id,'SUPERSEDED','RECONCILED');changed.add(row.id);}
+      for(const row of [...conflicts,...(!correction&&change.operation==='correct'?explicit:[])]){this.status(row.id,'CONFLICT','CONFLICTING_INTERPRETATION');changed.add(row.id);}
+      invalidated.push(...changed,...this.invalidateDescendants(run.agent_id,[...changed],id));
       this.journal(run.agent_id,run.id,change.operation.toUpperCase(),replace.map(row=>row.id),id);
     }
-    return invalidated;
+    return [...new Set(invalidated)];
   }
   invalidateMessage(session:string,messageId:string):string[]{
     this.transaction();
-    const rows=this.store.all<Row>(`WITH RECURSIVE affected(id) AS (
+    const rows=this.store.all<MemoryRow>(`WITH RECURSIVE affected(id) AS (
       SELECT m.id FROM memories m JOIN agent_instances a ON a.id=m.agent_id
       WHERE a.session_id=? AND EXISTS(SELECT 1 FROM json_each(m.sources_json) WHERE value=?)
       UNION SELECT e.child_id FROM memory_edges e JOIN affected p ON p.id=e.parent_id)
