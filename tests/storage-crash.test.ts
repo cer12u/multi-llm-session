@@ -81,3 +81,25 @@ it.each(['after-state-write','after-commit'])('R10-STORAGE-008: %s restores atom
   expect(service.session(f.id).bot_count).toBe(0);expect(service.snapshot(f.id).messages).toHaveLength(1);
   expect(JSON.stringify(service.snapshot(f.id))).not.toContain('復旧後も本人だけ');record(phase,'private-result',1);
 },20000);
+
+it.each(['after-message-write','after-commit'])('R10-STORAGE-012: %s cannot publish the same Agent candidate twice after Core recovery',async phase=>{
+  const f=setup();f.say('発言の根拠');f.start();f.speak(f.claim()!);const draft=f.claim()!;
+  f.finish(draft,{decision:'DRAFT',text:'一度だけ確定するAgentの発言'});
+  const candidate=f.store.get<{id:string;state:string}>('SELECT id,state FROM candidates')!;expect(candidate.state).toBe('READY');f.close();
+  await crash(f.config.dbPath,phase,'/v1/worker/claim',{epoch:f.epochs['worker-0']},{authorization:'Bearer '+f.config.workerTokens['worker-0']});
+  const db=new Store(f.config.dbPath);cleanup.push(()=>db.close());const service=new SessionService(db,f.config,f.now,()=>0);
+  const rows=()=>db.all<{id:string;sequence:number}>('SELECT id,sequence FROM messages WHERE candidate_id=?',candidate.id);
+  expect(rows()).toHaveLength(phase==='after-commit'?1:0);const committedId=rows()[0]?.id;service.recover();
+  if(phase==='after-message-write'){
+    const epoch=service.registerWorker('worker-0').epoch,review=service.claim('worker-0',epoch)!;
+    expect(review.kind).toBe('review');const call=service.reserveCall('worker-0',epoch,review.id,review.token,randomUUID(),'primary');
+    service.finishCall('worker-0',review.id,review.token,call.id,{inputTokens:null,outputTokens:null},null);
+    service.completeRun('worker-0',epoch,review.id,review.token,{decision:'KEEP'});expect(service.commitNext(f.id)?.text).toBe('一度だけ確定するAgentの発言');
+  }
+  expect(service.commitNext(f.id)).toBeNull();service.tick();
+  expect(rows()).toHaveLength(1);expect(rows()[0].sequence).toBe(2);if(committedId)expect(rows()[0].id).toBe(committedId);
+  expect(service.session(f.id).bot_count).toBe(1);expect(service.snapshot(f.id).messages).toHaveLength(2);
+  expect(db.get<{state:string}>('SELECT state FROM candidates WHERE id=?',candidate.id)!.state).toBe('COMMITTED');
+  expect(service.eventsAfter(f.id,f.id+':0').filter(e=>e.kind==='message.created'&&e.message?.id===rows()[0].id)).toHaveLength(1);
+  record(phase,'agent-candidate',1);
+},20000);
