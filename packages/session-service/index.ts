@@ -376,7 +376,11 @@ export class SessionService {
       this.verifyEpoch(slot,epoch);
       this.store.run('UPDATE workers SET last_seen_at=? WHERE slot=?',this.now(),slot);
       const old=this.store.get<RunRow>("SELECT * FROM runs WHERE slot=? AND state='ACTIVE'",slot);
-      if(old) return this.claimed(old);
+      if(old) {
+        if(this.inputs.reusable(old)) return this.claimed(old);
+        this.cancelRuns(old.session_id,'INPUT_INVALIDATED',slot);
+        this.wake(old.agent_id,'INPUT_CHANGED');
+      }
       for(const a of this.store.all<AgentRow>("SELECT a.* FROM agent_instances a JOIN sessions s ON s.id=a.session_id WHERE a.slot=? AND a.enabled=1 AND s.lifecycle='RUNNING' ORDER BY a.rowid",slot)) {
         const s=this.session(a.session_id),st=settingsOf(s),c=this.candidate(a.id);
         if(!this.providers.mayClaim(profileOf(a),a.error_count,st.maxRetries)||(a.retry_at!==null&&a.retry_at>this.now())) continue;
@@ -462,7 +466,6 @@ export class SessionService {
       let context=JSON.parse(r.context_json) as Context;
       ensure(context.self.privateState?.version===this.privateStates.read(r.agent_id,r.session_id).version,409,'STALE_PRIVATE_STATE');
       context.retrieved=[...(context.retrieved??[]),...results];
-      // The model adapter may trim optional recent context, never review or retrieval evidence.
       ensure(JSON.stringify(context.retrieved).length<=settingsOf(this.session(r.session_id)).contextChars,422,'LOOKUP_CONTEXT_LIMIT');
       context=this.privateStates.prepare(this.agent(r.agent_id),context);
       this.store.run('UPDATE runs SET context_json=?,retrieval_count=retrieval_count+1 WHERE id=?',JSON.stringify(context),id);
@@ -531,7 +534,6 @@ export class SessionService {
             this.store.run('INSERT INTO memory_input_origins(memory_id,run_id,evidence_json) VALUES(?,?,?)',memoryId,r.id,JSON.stringify(evidence));
           }
         }
-        // Retention is separate from prompt selection. Never evict old memories to limit a prompt.
         const supplied=(JSON.parse(r.context_json) as Context).messages;
         this.store.run('UPDATE agent_instances SET memory_revision=MAX(memory_revision,?) WHERE id=?',Math.max(0,...supplied.map(m=>m.revision)),a.id);
         this.trace(s.id,a.id,id,'MEMORY_SAVED',{notes:result.notes.length});
@@ -555,6 +557,12 @@ export class SessionService {
     return this.write(()=>{
       const previous=this.ownRun(slot,id,token); if(previous.state==='FAILED') return {ok:true};
       const r=this.validRun(slot,epoch,id,token),a=this.agent(r.agent_id),st=settingsOf(this.session(r.session_id));
+      // An external input/state invalidation is not a provider failure or a successful observation.
+      if(!this.inputs.reusable(r)) {
+        this.cancelRuns(r.session_id,'INPUT_INVALIDATED',slot);
+        this.wake(a.id,'INPUT_CHANGED');
+        return {ok:true};
+      }
       this.store.run("UPDATE runs SET state='FAILED',result_json=? WHERE id=?",JSON.stringify({code}),id);
       this.store.run("UPDATE llm_calls SET status='ABANDONED' WHERE run_id=? AND status='RESERVED'",id);
       if(code==='CONFIG_ERROR')this.providers.finish(profileOf(a),id,code);
@@ -624,7 +632,7 @@ export class SessionService {
         const busy=agents.some(a=>(!a.deferral_json&&a.wake_seq>a.processed_wake&&a.error_count<=settingsOf(s).maxRetries)||this.inputs.progress(a.id,s.id).observationPending>0||this.inputs.memoryDue(a,settingsOf(s))||!!this.candidate(a.id))||
           !!this.store.get("SELECT id FROM runs WHERE session_id=? AND state='ACTIVE'",s.id);
         const activity=agents.some(a=>a.error_count>0||!this.publicAgent(a).workerOnline)?'DEGRADED':busy?'ACTIVE':'QUIET';
-        if(activity!==s.activity) { this.store.run('UPDATE sessions SET activity=? WHERE id=?',activity,s.id); this.emit(s.id,'session.activity',{activity}); }
+        if(activity!==s.activity) { this.store.run('UPDATE sessions SET activity=?,stop_reason=stop_reason WHERE id=?',activity,s.id); this.emit(s.id,'session.activity',{activity}); }
       }
     });
   }
