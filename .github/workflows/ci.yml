@@ -11,6 +11,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   verify:
+    outputs:
+      diagnostic: ${{ steps.typecheck.outputs.diagnostic || steps.tests.outputs.diagnostic }}
+      counts: ${{ steps.tests.outputs.counts }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -22,9 +25,12 @@ jobs:
           node-version: '24.20.0'
           package-manager-cache: false
       - run: npm ci
-      - run: npm run typecheck
+      - name: TypeScript checking
+        id: typecheck
+        run: node deploy/ci-check.mjs typecheck
       - name: Unit, transaction, recovery, privacy and HTTP tests
-        run: npm test
+        id: tests
+        run: node deploy/ci-check.mjs tests
       - run: npm run build
       - name: Export contract schemas
         run: node dist/apps/cli/schema.js
@@ -51,6 +57,14 @@ jobs:
             test-results/
           retention-days: 7
           if-no-files-found: warn
+  verification-detail:
+    needs: verify
+    if: always()
+    name: "Verification detail — ${{ needs.verify.outputs.diagnostic || needs.verify.outputs.counts || needs.verify.result }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: echo 'The verify job remains authoritative. See the synthetic summary artifact and original command logs.'
   container:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
