@@ -98,7 +98,7 @@ export class Store {
     this.db.pragma('foreign_keys = ON'); this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
     if (version === 0) this.tx(() => this.db.exec(legacySchemaV1));
-    else if (version > 4) { this.db.close(); throw new Error('Unsupported database schema: ' + version); }
+    else if (version > 5) { this.db.close(); throw new Error('Unsupported database schema: ' + version); }
     migrate(this.db);
   }
   get<T>(sql: string, ...args: unknown[]): T|undefined { return this.db.prepare(sql).get(...args) as T|undefined; }
