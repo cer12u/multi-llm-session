@@ -57,7 +57,6 @@ describe('R2 private working state: transactions and ownership, not natural-lang
 
   it('R2-STATE-004: a competing version rejects the whole action, including candidate creation', () => {
     const f = setup(); f.say(); f.start(); const r = claim(f), change = patch(r);
-    // Simulate a concurrent internal state invalidation after the request was captured.
     f.store.tx(() => f.store.run('UPDATE agent_private_states SET version=version+1 WHERE agent_id=?', r.context.self.id));
     const action = { decision: 'SPEAK', intent: { act: 'comment', intent: '古い判断', replyTo: null, addressedTo: [] } };
     expect(() => f.finish(r, { action, statePatch: change })).toThrow('STALE_PRIVATE_STATE');
@@ -96,8 +95,10 @@ describe('R2 private working state: transactions and ownership, not natural-lang
   });
 
   it.each(['unseen', 'foreign', 'wrong-version'] as const)('R2-STATE-007: rejects %s evidence rather than trusting its ID', kind => {
-    const f = setup(3, { contextMessages: 5 }); const old = f.say('履歴窓の外');
-    for (let i = 0; i < 7; i++) f.say('最近の発言 ' + i);
+    const f = setup(3, { contextMessages: 5 }); f.say('最初の観測対象');
+    for (let i = 0; i < 7; i++) f.say('未処理入力 ' + i);
+    // Sequential observation supplies the FIRST five inputs, not the latest five.
+    const old = f.say('まだ供給していない後方の入力');
     const foreignSession = f.service.createSession(f.input, randomUUID()).id;
     const foreign = f.service.humanMessage(foreignSession, { text: '別部屋' }, randomUUID());
     f.start(); const r = claim(f), change = patch(r);
@@ -190,10 +191,13 @@ it('R2-STATE-020: a populated V2 database migrates with notes, IDs, settings and
   const agent = f.service.agents(f.id)[0], memoryId = randomUUID();
   f.store.run('INSERT INTO memories(id,agent_id,text,sources_json,created_at,sequence) VALUES(?,?,?,?,?,?)', memoryId, agent.id, '出典の確度を勝手に昇格しない旧メモ', JSON.stringify([source.id]), f.now(), 1);
   f.store.run('UPDATE agent_instances SET memory_seq=1 WHERE id=?', agent.id);
-  // V3 is strictly additive; removing its two new tables restores the actual populated V2 schema.
-  f.store.db.exec('DROP TABLE agent_state_updates; DROP TABLE agent_private_states; PRAGMA user_version=2;'); f.close();
+  // Build an actual V2 fixture by removing every additive V3/V4 object; this is NOT a rollback procedure.
+  f.store.db.exec(`DROP TRIGGER input_message_insert; DROP TRIGGER input_message_update; DROP TRIGGER input_source_insert;
+    DROP TABLE memory_input_origins; DROP TABLE candidate_state_bindings; DROP TABLE agent_input_receipts;
+    DROP TABLE agent_input_cursors; DROP TABLE agent_input_log;
+    DROP TABLE agent_state_updates; DROP TABLE agent_private_states; PRAGMA user_version=2;`); f.close();
   const db = new Store(f.config.dbPath); cleanup.push(() => db.close()); const service = new SessionService(db, f.config, f.now);
-  expect(db.db.pragma('user_version', { simple: true })).toBe(3);
+  expect(db.db.pragma('user_version', { simple: true })).toBe(4);
   expect(service.snapshot(f.id).messages[0].id).toBe(source.id);
   expect(service.workerMemories(agent.slot, agent.id)).toHaveLength(1);
   expect(service.workerMemories(agent.slot, agent.id)[0]).toMatchObject({ id: memoryId });

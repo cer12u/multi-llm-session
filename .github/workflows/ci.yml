@@ -14,6 +14,7 @@ jobs:
     outputs:
       diagnostic: ${{ steps.typecheck.outputs.diagnostic || steps.tests.outputs.diagnostic }}
       counts: ${{ steps.tests.outputs.counts }}
+      failures: ${{ steps.tests.outputs.failures || steps.typecheck.outputs.failures }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -60,11 +61,16 @@ jobs:
   verification-detail:
     needs: verify
     if: always()
-    name: "Verification detail — ${{ needs.verify.outputs.diagnostic || needs.verify.outputs.counts || needs.verify.result }}"
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        detail: ${{ fromJSON(needs.verify.outputs.failures || '["No unit result; inspect verify job"]') }}
+    name: "Diagnostic only — ${{ matrix.detail }}"
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
-      - run: echo 'The verify job remains authoritative. See the synthetic summary artifact and original command logs.'
+      - run: echo 'The verify and container jobs remain authoritative. This job only displays bounded synthetic diagnostics; its success is not acceptance.'
   container:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

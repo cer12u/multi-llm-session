@@ -24,7 +24,7 @@ it('migrates a populated v1 database without dropping messages, old memory, pers
   let db:Store|undefined;
   try{
     db=new Store(file);const service=new SessionService(db,config,()=>1000000);
-    expect(db.db.pragma('user_version',{simple:true})).toBe(3);
+    expect(db.db.pragma('user_version',{simple:true})).toBe(4);
     expect((service.exportSession(session).transcript as unknown[])).toHaveLength(260);
     expect(service.workerMemories('worker-0',agent)).toHaveLength(60);
     expect(service.pages.thread(session,root,{limit:200}).items).toHaveLength(200);

@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { StatePatchSchema, type PrivateState, type ObservationManifest } from './agent-state.js';
 export * from './agent-state.js';
+import type { InputWindow, InputProgress, InputSelection } from './input-window.js';
+export * from './input-window.js';
 
 export const Id = z.string().uuid();
 export const Slug = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/);
@@ -44,6 +46,8 @@ export const SettingsSchema = z.object({
   maxDurationMs: z.number().int().min(1000).max(21600000).default(3600000),
   contextMessages: z.number().int().min(5).max(100).default(40),
   contextChars: z.number().int().min(4000).max(100000).default(24000),
+  memoryShareEvery: z.number().int().min(1).max(32).default(3),
+  memoryFlushMs: z.number().int().min(100).max(86400000).default(60000),
   memoryEvery: z.number().int().min(3).max(1000).default(12),
   requestTimeoutMs: z.number().int().min(1000).max(180000).default(90000),
   leaseMs: z.number().int().min(5000).max(180000).default(30000),
@@ -94,22 +98,25 @@ export const UsageSchema = z.object({
 export type Usage = z.infer<typeof UsageSchema>;
 export const ErrorCodeSchema = z.enum(['API_ERROR', 'AUTH_ERROR', 'RATE_LIMIT', 'TIMEOUT', 'FORMAT_ERROR', 'CONTEXT_LIMIT', 'CANCELLED', 'CONFIG_ERROR']);
 export type ModelErrorCode = z.infer<typeof ErrorCodeSchema>;
-export type RunKind = 'decide' | 'draft' | 'review' | 'memory';
+export type RunKind = 'decide' | 'draft' | 'review' | 'memory' | 'observe';
+export const ObserveSchema = z.object({ decision: z.literal('ABSTAIN'), reason: z.string().max(160) }).strict();
 // Legacy actions remain accepted for existing fixtures/clients. The envelope adds a
 // private state transition without adding fields to the public action contracts.
 export const StatefulOutputSchemas = {
+  observe: z.object({ action: ObserveSchema, statePatch: StatePatchSchema.nullable() }).strict(),
   decide: z.object({ action: DecisionSchema, statePatch: StatePatchSchema.nullable() }).strict(),
   draft: z.object({ action: DraftSchema, statePatch: StatePatchSchema.nullable() }).strict(),
   review: z.object({ action: ReviewSchema, statePatch: StatePatchSchema.nullable() }).strict(),
   memory: z.object({ action: MemorySchema, statePatch: StatePatchSchema.nullable() }).strict(),
 };
 export const OutputSchemas = {
+  observe: z.union([ObserveSchema, StatefulOutputSchemas.observe]),
   decide: z.union([DecisionSchema, StatefulOutputSchemas.decide]),
   draft: z.union([DraftSchema, StatefulOutputSchemas.draft]),
   review: z.union([ReviewSchema, StatefulOutputSchemas.review]),
   memory: z.union([MemorySchema, StatefulOutputSchemas.memory]),
 };
-export type RunOutput = z.infer<typeof OutputSchemas.decide> | z.infer<typeof OutputSchemas.draft> | z.infer<typeof OutputSchemas.review> | z.infer<typeof OutputSchemas.memory>;
+export type RunOutput = z.infer<typeof OutputSchemas.observe> | z.infer<typeof OutputSchemas.decide> | z.infer<typeof OutputSchemas.draft> | z.infer<typeof OutputSchemas.review> | z.infer<typeof OutputSchemas.memory>;
 export type Lifecycle = 'DRAFT' | 'RUNNING' | 'PAUSED' | 'ENDED';
 export type Activity = 'ACTIVE' | 'QUIET' | 'DEGRADED' | 'BUDGET_PAUSED';
 export type PublicMessage = {
@@ -128,6 +135,8 @@ export type PublicEvent = { id: string; sessionId: string; kind: string; revisio
 export type Context = {
   self: { id: string; character: Character; privateState?: PrivateState }; observation?: ObservationManifest; participants: PublicAgent[]; revision: number; trigger: string;
   messages: PublicMessage[]; delta: PublicMessage[]; historyTruncated: boolean;
+  delivery?: InputWindow; progress?: InputProgress; selection?: InputSelection;
+  recall?: { algorithm: 'local-word-evidence-v1'; selected: {id:string;score:number;provenance:string}[]; omittedForBudget: string[] };
   coverage?: { fromRevision: number; throughRevision: number; targetRevision: number; complete: boolean };
   retrieved?: RetrievalResult[];
   memories: { id: string; text: string; sourceMessageIds: string[] }[];
@@ -157,6 +166,7 @@ export const LookupRequestSchema = z.object({
 export const LookupSchema = z.object({ decision: z.literal('LOOKUP'), requests: z.array(LookupRequestSchema).min(1).max(3) }).strict();
 export type LookupRequest = z.infer<typeof LookupRequestSchema>;
 export const WireOutputSchemas = {
+  observe: z.union([OutputSchemas.observe, LookupSchema]),
   decide: z.union([OutputSchemas.decide, LookupSchema]), draft: z.union([OutputSchemas.draft, LookupSchema]),
   review: z.union([OutputSchemas.review, LookupSchema]), memory: OutputSchemas.memory,
 };

@@ -22,10 +22,11 @@ function prompt(kind: RunKind, context: Context, maxChars: number, wrapped: bool
   while(!c.observation&&JSON.stringify(c).length>maxChars-4000&&c.messages.length>2) { c.messages.shift(); c.historyTruncated=true; }
   if(JSON.stringify(c).length>maxChars) throw new ModelError('CONTEXT_LIMIT');
   const tasks:Record<RunKind,string>={
+    observe:'Observe only the supplied delivery window. You are still listening while public participation is deferred, cooling down, or catching up. Return ABSTAIN, optionally with a short private statePatch. This is not permission to publish or cancel your deferral. Keep pending questions and intentions unless this input changes them. Do not claim to have read outside the exact delivery window.',
     decide:'Choose whether YOU want to speak now, defer, or abstain. No fixed order, no compulsory reply, no compulsory novelty, and no need to prolong a finished conversation. A new topic, joke, acknowledgement or disagreement is allowed. Decide only your own participation. Use existing message and participant IDs for references.',
     draft:'Write only your own proposed utterance, following your private intent and the latest public context. You may DROP a no-longer-useful intention. Do not write a script for multiple characters. Never add another speaker label. Do not force a closing question or a summary.',
     review:'Read the new context and delta against your private candidate. KEEP only if it is still appropriate; otherwise REWRITE, DEFER or DROP. The other participants have already spoken: avoid duplicate replies and stale references. An acknowledgement is still allowed. A deleted message cannot be cited as an available source.',
-    memory:'Reflect privately on the confirmed conversation. Return at most four concise notes worth retaining, each grounded in actual sourceMessageIds. Do not invent facts, quotes, experiences or source IDs. Return an empty notes array when nothing is worth saving.',
+    memory:'Process exactly the supplied unprocessed delivery window, including corrections and tombstones. The memory cursor is separate from participation. Superseded event notifications show the current original, not its lost earlier text. Sources marked excerpt are not full documents. Reflect privately on the confirmed conversation. Return at most four concise notes worth retaining, each grounded in actual sourceMessageIds. Do not invent facts, quotes, experiences or source IDs. Return an empty notes array when nothing is worth saving.',
   };
   const schema=z.toJSONSchema(WireOutputSchemas[kind]);
   const privateTask=c.observation?' Your privateState is your own continuing working state, not another agent\'s knowledge. You may return {action: <the requested action>, statePatch: <patch or null>}. Record brief understandings, interests, unresolved questions or deferred intentions even when action is ABSTAIN or DEFER. Use your agentId, sessionId, current version as expectedVersion and the supplied observation.id. Upsert only changed entries; remove only resolved/withdrawn entries. Keep unrelated entries unchanged. Evidence must use the supplied message/source ID and version. Empty evidence means an ungrounded personal interest, not a verified fact. Resume conditions are retained data, not a command or a promise of automatic scheduling. Never expose working-state text as a public utterance unless you independently choose to say it. Do not include chain-of-thought. The manifest covers only the selected input, never the entire session history.':'';
@@ -45,6 +46,7 @@ async function limitedText(response: Response): Promise<string> {
   const out=new Uint8Array(bytes); let offset=0; for(const c of chunks) { out.set(c,offset); offset+=c.byteLength; }
   return new TextDecoder().decode(out);
 }
+
 export class HttpModel implements Model {
   constructor(readonly profile: ModelProfile, readonly key: string|undefined, readonly fetcher: typeof fetch=fetch) {
     if(profile.provider==='mock'||!profile.baseUrl||(profile.authRequired&&!key)) throw new ModelError('CONFIG_ERROR');
@@ -90,7 +92,8 @@ export class MockModel implements Model {
     const own=visible.slice(human+1).filter(m=>m.authorId===c.self.id).length;
     const intent={act:'comment',intent:'Demonstrate an independent response to the current public context',replyTo:last?.id??null,addressedTo:[]};
     let value:unknown;
-    if(kind==='decide') value=own>=2||['IDLE','SELF_WAKE'].includes(c.trigger)?{decision:'ABSTAIN',reason:'Mock fixture has no further contribution'}:{decision:'SPEAK',intent};
+    if(kind==='observe') value={decision:'ABSTAIN',reason:'Mock input-delivery fixture'};
+    else if(kind==='decide') value=own>=2||['IDLE','SELF_WAKE'].includes(c.trigger)?{decision:'ABSTAIN',reason:'Mock fixture has no further contribution'}:{decision:'SPEAK',intent};
     else if(kind==='draft') value={decision:'DRAFT',text:`【模擬応答】${c.self.character.name}です。${last?`${last.authorName}の「${[...last.text].slice(0,45).join('')}」を読みました。`:'別々の参加者として会話を始めます。'}これはAPIキー不要の制御検証です。`};
     else if(kind==='review') value=own>=2?{decision:'DROP',reason:'Mock contribution already made'}:c.delta.length?{
       decision:'REWRITE',intent,text:`【模擬応答・再確認】${c.self.character.name}です。${last?.authorName??'参加者'}の新しい発言を受け、先ほどの候補を更新しました。参照: ${last?.id.slice(0,8)??'none'}。`,
