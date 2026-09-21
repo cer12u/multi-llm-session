@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { CURRENT_SCHEMA_VERSION } from './schema-version.js';
 
-const coreTables=['characters','workers','sessions','agent_instances','candidates','runs','messages','events','command_receipts','traces','llm_calls','memories','pending_questions','source_items'];
+const coreTables=['characters','workers','sessions','agent_instances','candidates','runs','messages','events','command_receipts','traces','llm_calls','memories','pending_questions','source_items','messages_fts'];
 const versionTables:Record<number,string[]>={
   2:['provider_health','model_profiles'],3:['agent_private_states','agent_state_updates'],
   4:['agent_input_log','agent_input_cursors','agent_input_receipts','memory_input_origins','candidate_state_bindings'],
@@ -27,13 +27,14 @@ function check(db:Database.Database):number {
   if(required.some(name=>!tables.has(name)))throw new Error('STORAGE_SCHEMA_INCOMPLETE');
   const integrity=db.pragma('integrity_check') as {integrity_check:string}[];
   if(integrity.length!==1||integrity[0].integrity_check!=='ok')throw new Error('STORAGE_INTEGRITY_FAILED');
-  if(db.pragma('foreign_key_check').length)throw new Error('STORAGE_FOREIGN_KEY_FAILED');return version;
+  const violations=db.pragma('foreign_key_check');
+  if(!Array.isArray(violations)||violations.length)throw new Error('STORAGE_FOREIGN_KEY_FAILED');return version;
 }
 function size(path:string):number{return existsSync(path)?statSync(path).size:0;}
 function report(db:Database.Database,path:string):StorageReport {
   return db.transaction(()=>{
     const version=check(db),rows:Record<string,number>={};
-    for(const {name} of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'messages_fts%' ORDER BY name").all() as {name:string}[]){
+    for(const {name} of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*' AND name NOT GLOB 'messages_fts*' ORDER BY name").all() as {name:string}[]){
       rows[name]=(db.prepare('SELECT COUNT(*) n FROM "'+name.replaceAll('"','""')+'"').get() as {n:number}).n;
     }
     const pageSize=db.pragma('page_size',{simple:true}) as number;
@@ -53,12 +54,10 @@ export async function backupDatabase(source:string,destination:string):Promise<S
   const db=openExisting(src);let temporary:string|undefined;
   try{
     check(db);mkdirSync(dirname(target),{recursive:true});temporary=target+'.partial-'+randomUUID();
-    // Reserve a private temporary inode before SQLite opens it; do not expose a world-readable intermediate.
     closeSync(openSync(temporary,'wx',0o600));await db.backup(temporary);
     const completed=openExisting(temporary,false);
     try{completed.pragma('journal_mode = DELETE');check(completed);}finally{completed.close();}
     chmodSync(temporary,0o600);const fd=openSync(temporary,'r');try{fsyncSync(fd);}finally{closeSync(fd);}
-    // Same-directory hard link is an atomic no-replace publication, including a concurrent destination creator.
     linkSync(temporary,target);unlinkSync(temporary);temporary=undefined;
     const dir=openSync(dirname(target),'r');try{fsyncSync(dir);}finally{closeSync(dir);}
     return inspectDatabase(target);
