@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AgentAgenda } from './agenda.js';
 import { AgentInputs } from './inputs.js';
 import { PrivateStates } from './private-state.js';
 import { ArchivePages } from './pages.js';
@@ -27,12 +28,14 @@ export class SessionService {
   readonly providers: ProviderState;
   private readonly privateStates: PrivateStates;
   private readonly inputs: AgentInputs;
+  private readonly agenda: AgentAgenda;
   constructor(readonly store: Store, readonly config: Config, readonly now: () => number = Date.now,
     readonly random: () => number = Math.random) {
     this.pages = new ArchivePages(store, row => this.publicMessage(row));
     this.providers = new ProviderState(store, now);
     this.privateStates = new PrivateStates(store, now);
     this.inputs = new AgentInputs(store, now, row => this.publicMessage(row));
+    this.agenda = new AgentAgenda(store, now);
     this.changes.setMaxListeners(100);
     store.tx(() => {
       for (const slot of Object.keys(config.workerTokens)) store.run('INSERT OR IGNORE INTO workers(slot) VALUES(?)', slot);
@@ -184,6 +187,7 @@ export class SessionService {
       }
       this.cancelRuns(id,'LIFECYCLE_CHANGED');
       this.store.run("UPDATE candidates SET state=? WHERE session_id=? AND state='READY'",action==='end'?'DROPPED':'NEEDS_REVIEW',id);
+      if(action==='end') this.agenda.endSession(id);
       if(action==='end') this.store.run("UPDATE candidates SET state='DROPPED',reason='ENDED' WHERE session_id=? AND state IN ('DRAFTING','NEEDS_REVIEW','DEFERRED')",id);
       for(const a of this.agents(id)) {
         this.store.run('UPDATE agent_instances SET state=?,next_self_at=? WHERE id=?',action==='end'?'ended':action==='pause'?'paused':'listening',this.selfWake(settingsOf(s)),a.id);
@@ -234,7 +238,7 @@ export class SessionService {
     let deferral=a.deferral_json?JSON.parse(a.deferral_json) as StoredDeferral:null;
     const isMessage=['MESSAGE','DIRECTED','EDIT'].includes(trigger);
     if(deferral&&(deferral.until<=this.now()||(deferral.kind==='new_message'&&isMessage)||
-      (deferral.kind==='answer_from'&&isMessage&&author===deferral.agentId)||trigger==='RECOVERY')) {
+      (deferral.kind==='answer_from'&&isMessage&&author===deferral.agentId)||trigger==='RECOVERY'||trigger==='AGENDA')) {
       deferral=null;
       this.store.run('UPDATE agent_instances SET deferral_json=NULL,pending_since=NULL,due_at=NULL WHERE id=?',a.id);
       const c=this.candidate(a.id);
@@ -362,6 +366,7 @@ export class SessionService {
     const coverage=candidate?{fromRevision:candidate.reviewed_revision,throughRevision:through,targetRevision:s.revision,complete}:undefined;
     const selected=this.privateStates.prepare(agent,{self:{id:agent.id,character:characterOf(agent)},participants:this.agents(s.id).filter(a=>a.enabled).map(a=>this.publicAgent(a)),
       revision:s.revision,trigger:agent.trigger,messages,delta,...coverage?{coverage}:{},historyTruncated:rows.length>0&&rows[0].revision>1,
+      agenda:this.agenda.view(agent.id,st,Math.max(0,st.maxDurationMs-this.activeElapsed(s))),
       memories,questions,sources,candidate:candidate?{id:candidate.id,version:candidate.version,intent:intentOf(candidate),text:candidate.text,reviewedRevision:candidate.reviewed_revision}:null});
     return this.privateStates.prepare(agent,this.inputs.context(agent,selected,kind,st));
   }
@@ -377,7 +382,7 @@ export class SessionService {
       this.store.run('UPDATE workers SET last_seen_at=? WHERE slot=?',this.now(),slot);
       const old=this.store.get<RunRow>("SELECT * FROM runs WHERE slot=? AND state='ACTIVE'",slot);
       if(old) {
-        if(this.inputs.reusable(old)) return this.claimed(old);
+        if(this.inputs.reusable(old)&&this.agenda.reusable(old)) return this.claimed(old);
         this.cancelRuns(old.session_id,'INPUT_INVALIDATED',slot);
         this.wake(old.agent_id,'INPUT_CHANGED');
       }
@@ -541,6 +546,8 @@ export class SessionService {
       const stateResult=this.privateStates.complete(r,statePatch);
       this.trace(s.id,a.id,id,'PRIVATE_STATE_APPLIED',stateResult);
       this.inputs.complete(r);
+      this.agenda.complete(r);
+      this.agenda.sync(a,this.privateStates.read(a.id,s.id),st,delivery.throughInput);
       const active=this.candidate(a.id);
       if(active&&['decide','draft','review'].includes(r.kind)) this.inputs.bindCandidate(active.id,stateResult.version);
       else if(active?.state==='READY'&&stateResult.changed) this.store.run("UPDATE candidates SET state='NEEDS_REVIEW',reason='PRIVATE_STATE_CHANGED' WHERE id=?",active.id);
@@ -558,7 +565,7 @@ export class SessionService {
       const previous=this.ownRun(slot,id,token); if(previous.state==='FAILED') return {ok:true};
       const r=this.validRun(slot,epoch,id,token),a=this.agent(r.agent_id),st=settingsOf(this.session(r.session_id));
       // An external input/state invalidation is not a provider failure or a successful observation.
-      if(!this.inputs.reusable(r)) {
+      if(!this.inputs.reusable(r)||!this.agenda.reusable(r)) {
         this.cancelRuns(r.session_id,'INPUT_INVALIDATED',slot);
         this.wake(a.id,'INPUT_CHANGED');
         return {ok:true};
@@ -611,9 +618,19 @@ export class SessionService {
       }
       for(let s of this.store.all<SessionRow>("SELECT * FROM sessions WHERE lifecycle='RUNNING'")) {
         if(this.timeExceeded(s)) { this.pauseForLimit(s.id,'MAX_DURATION'); continue; }
-        for(const a of this.agents(s.id)) {
+        for(let a of this.agents(s.id)) {
           if(!a.enabled) continue;
-          const st=settingsOf(s),c=this.candidate(a.id);
+          const st=settingsOf(s);
+          this.agenda.sync(a,this.privateStates.read(a.id,s.id),st,this.inputs.high(s.id));
+          if(s.call_count-s.window_call_start<st.maxCalls&&s.bot_count-s.window_post_start<st.maxMessages&&
+            this.providers.mayClaim(profileOf(a),a.error_count,st.maxRetries)&&
+            (a.retry_at===null||a.retry_at<=this.now())&&this.agenda.dispatch(a,st)) {
+            this.wake(a.id,'AGENDA');
+            this.store.run('UPDATE agent_instances SET next_self_at=? WHERE id=?',this.selfWake(st),a.id);
+            this.trace(s.id,a.id,null,'AGENDA_WAKE');
+            a=this.agent(a.id);
+          }
+          const c=this.candidate(a.id);
           if(a.deferral_json&&(JSON.parse(a.deferral_json) as StoredDeferral).until<=this.now()) this.wake(a.id,'DEFER_DUE');
           if(c?.state==='READY'&&(c.review_due_at<=this.now()||c.reviewed_revision!==s.revision||c.reviewed_wake!==a.wake_seq)) {
             this.store.run("UPDATE candidates SET state='NEEDS_REVIEW' WHERE id=?",c.id);
@@ -686,7 +703,7 @@ export class SessionService {
   }
   diagnostics(id: string): Record<string,unknown> {
     this.session(id);
-    return {providers:this.providerDiagnostics(),agents:this.agents(id).map(a=>({id:a.id,slot:a.slot,state:a.state,workerOnline:this.publicAgent(a).workerOnline,nextRetryAt:a.retry_at,lastError:a.last_error,processedRevision:a.processed_revision,dirtyRevision:a.dirty_revision,wakeSeq:a.wake_seq,processedWake:a.processed_wake,dueAt:a.due_at,errorCount:a.error_count,inputProgress:this.inputs.progress(a.id,id),deferral:a.deferral_json?JSON.parse(a.deferral_json):null})),
+    return {providers:this.providerDiagnostics(),agents:this.agents(id).map(a=>({id:a.id,slot:a.slot,state:a.state,workerOnline:this.publicAgent(a).workerOnline,nextRetryAt:a.retry_at,lastError:a.last_error,processedRevision:a.processed_revision,dirtyRevision:a.dirty_revision,wakeSeq:a.wake_seq,processedWake:a.processed_wake,dueAt:a.due_at,errorCount:a.error_count,inputProgress:this.inputs.progress(a.id,id),agenda:this.agenda.view(a.id,settingsOf(this.session(id)),Math.max(0,settingsOf(this.session(id)).maxDurationMs-this.activeElapsed(this.session(id)))),deferral:a.deferral_json?JSON.parse(a.deferral_json):null})),
       candidates:this.store.all<CandidateRow>('SELECT * FROM candidates WHERE session_id=? ORDER BY first_interested_at DESC LIMIT 30',id),
       runs:this.store.all('SELECT id,agent_id,kind,state,snapshot_revision,created_at,lease_until FROM runs WHERE session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 30',id),
       traces:this.store.all('SELECT agent_id,run_id,code,detail,created_at FROM traces WHERE session_id=? ORDER BY id DESC LIMIT 150',id),metrics:this.metrics(id)};

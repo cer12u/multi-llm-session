@@ -45,14 +45,39 @@ export class AgentAgenda {
     }
   }
 
+  private matchValid(plan: PlanRow): boolean {
+    if (plan.matched_input === null) return true;
+    const input = this.store.get<Notification>('SELECT id,kind,entity_id,version FROM agent_input_log WHERE id=?', plan.matched_input);
+    if (!input || input.version !== plan.matched_version) return false;
+    const live = input.kind === 'message'
+      ? this.store.get<{version:number;deleted:number}>('SELECT revision version,deleted FROM messages WHERE id=?', input.entity_id)
+      : this.store.get<{version:number;deleted:number}>('SELECT fetched_at version,0 deleted FROM source_items WHERE id=?', input.entity_id);
+    return !!live && !live.deleted && live.version === plan.matched_version;
+  }
+
+  reusable(run: RunRow): boolean {
+    const context = JSON.parse(run.context_json) as Context;
+    return (context.agenda?.triggered ?? []).every(signal => {
+      const plan = this.store.get<PlanRow>('SELECT * FROM agent_agenda WHERE id=? AND agent_id=?', signal.planId, run.agent_id);
+      return !!plan && plan.status === 'TRIGGERED' && plan.matched_input === signal.matchedInput &&
+        plan.matched_version === signal.matchedVersion && this.matchValid(plan);
+    });
+  }
+
   /** Returns true at most once per notification cohort. SessionService turns it into one wake, not a post. */
   dispatch(agent: AgentRow, settings: Settings): boolean {
     this.transaction();
-    for (const plan of this.active(agent.id)) {
+    for (let plan of this.active(agent.id)) {
+      if (plan.status === 'TRIGGERED' && !this.matchValid(plan)) {
+        this.store.run("UPDATE agent_agenda SET status='PENDING',matched_input=NULL,matched_version=NULL,notified=0,triggered_at=NULL,reason='MATCH_INVALIDATED' WHERE id=?", plan.id);
+        plan = this.store.get<PlanRow>('SELECT * FROM agent_agenda WHERE id=?', plan.id)!;
+      }
       if (plan.status !== 'PENDING') continue;
       const condition = JSON.parse(plan.condition_json) as Condition;
       if (condition.kind === 'time') {
-        if (settings.selfWakeEnabled && plan.effective_at !== null && this.now() >= plan.effective_at)
+        const due = Math.max(plan.effective_at ?? 0, plan.created_at + this.minimum(settings));
+        if (due !== plan.effective_at) this.store.run('UPDATE agent_agenda SET effective_at=? WHERE id=?', due, plan.id);
+        if (settings.selfWakeEnabled && this.now() >= due)
           this.store.run("UPDATE agent_agenda SET status='TRIGGERED',triggered_at=?,reason='TIME_DUE' WHERE id=?", this.now(), plan.id);
         continue;
       }
@@ -105,6 +130,7 @@ export class AgentAgenda {
     this.transaction();
     if (run.kind === 'memory' || run.kind === 'observe') return;
     const context = JSON.parse(run.context_json) as Context;
+    ensure(this.reusable(run), 409, 'STALE_AGENDA');
     if (!context.delivery?.complete || context.coverage?.complete === false) return;
     for (const signal of context.agenda?.triggered ?? []) {
       this.store.run("UPDATE agent_agenda SET status='CONSUMED',consumed_run=?,ended_at=?,reason='PARTICIPATION_RECONSIDERED' WHERE id=? AND agent_id=? AND status='TRIGGERED'",
