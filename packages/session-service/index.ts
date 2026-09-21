@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { ArchivePages } from './pages.js';
+import { ProviderState, providerScope } from '../provider-state/index.js';
+import { validateProfileUrl } from '../config/credentials.js';
 import { EventEmitter } from 'node:events';
 import {
   AppError, ensure, CharacterSchema, SessionCreateSchema, MessageInputSchema, SettingsSchema,
+  ModelProfileSchema, LookupSchema, type ModelProfile, type LookupRequest, type RetrievalResult,
   OutputSchemas, DecisionSchema, DraftSchema, ReviewSchema, MemorySchema, SourceSchema,
   type Character, type Intent, type Deferral, type RunKind, type ClaimedRun, type Context,
   type PublicAgent, type PublicMessage, type PublicSession, type PublicEvent, type Snapshot, type Usage, type ModelErrorCode,
@@ -17,12 +21,17 @@ const activeCandidateSQL = "SELECT * FROM candidates WHERE agent_id=? AND state 
 /** Only this service writes conversation state. No asynchronous work occurs inside its transactions. */
 export class SessionService {
   readonly changes = new EventEmitter();
+  readonly pages: ArchivePages;
+  readonly providers: ProviderState;
   constructor(readonly store: Store, readonly config: Config, readonly now: () => number = Date.now,
     readonly random: () => number = Math.random) {
+    this.pages = new ArchivePages(store, row => this.publicMessage(row));
+    this.providers = new ProviderState(store, now);
     this.changes.setMaxListeners(100);
     store.tx(() => {
       for (const slot of Object.keys(config.workerTokens)) store.run('INSERT OR IGNORE INTO workers(slot) VALUES(?)', slot);
       for (const character of config.characters) this.putCharacter(character);
+      for (const profile of config.profiles) this.putModelProfile(profile);
     });
   }
   private write<T>(fn: () => T): T { const result = this.store.tx(fn); this.changes.emit('changed'); return result; }
@@ -62,6 +71,55 @@ export class SessionService {
   characters(): Character[] {
     return this.store.all<{definition:string}>('SELECT c.definition FROM characters c WHERE c.version=(SELECT MAX(d.version) FROM characters d WHERE d.id=c.id) ORDER BY c.id').map(x=>JSON.parse(x.definition) as Character);
   }
+  modelProfiles(): ModelProfile[] {
+    return this.store.all<{definition:string}>('SELECT p.definition FROM model_profiles p WHERE p.version=(SELECT MAX(q.version) FROM model_profiles q WHERE q.id=p.id) ORDER BY p.id').map(p=>ModelProfileSchema.parse(JSON.parse(p.definition)));
+  }
+  putModelProfile(input:unknown):ModelProfile {
+    const p=ModelProfileSchema.parse(input); validateProfileUrl(p);
+    return this.store.tx(()=>{
+      const old=this.store.get<{hash:string}>('SELECT hash FROM model_profiles WHERE id=? AND version=?',p.id,p.version);
+      if(old) ensure(old.hash===hash(p),409,'PROFILE_VERSION_IMMUTABLE');
+      else {
+        const policy=(x:ModelProfile)=>JSON.stringify([x.maxConcurrent,x.failureThreshold,x.circuitCooldownMs]);
+        for(const other of this.modelProfiles().filter(x=>x.id!==p.id)) ensure(providerScope(other)!==providerScope(p)||policy(other)===policy(p),422,'CONFLICTING_PROVIDER_POLICY');
+        this.store.run('INSERT INTO model_profiles(id,version,definition,hash) VALUES(?,?,?,?)',p.id,p.version,JSON.stringify(p),hash(p));
+      }
+      return p;
+    });
+  }
+  providerDiagnostics() { return this.modelProfiles().map(profile=>({profile,health:this.providers.status(profile)})); }
+  retryProvider(profileId:string,key:string) {
+    return this.receipt('operator:provider',key,{profileId},()=>{
+      const p=this.modelProfiles().find(x=>x.id===profileId); ensure(p,404,'PROFILE_NOT_FOUND');
+      this.providers.requestProbe(p);
+      for(const a of this.store.all<AgentRow>('SELECT * FROM agent_instances')) if(providerScope(profileOf(a))===providerScope(p)) {
+        this.store.run('UPDATE agent_instances SET error_count=0,retry_at=NULL,last_error=NULL WHERE id=?',a.id);
+        this.wake(a.id,'RECOVERY'); this.trace(a.session_id,a.id,null,'PROVIDER_PROBE_REQUESTED');
+      }
+      return this.providers.status(p);
+    });
+  }
+  retryAgent(session:string,agentId:string,key:string) {
+    return this.receipt(`operator:${session}:agent-retry`,key,{agentId},()=>{
+      const a=this.agent(agentId); ensure(a.session_id===session,403,'AGENT_SESSION_MISMATCH');
+      ensure(this.session(session).lifecycle!=='ENDED',409,'SESSION_ENDED');
+      this.cancelRuns(session,'AGENT_RETRY',a.slot);
+      this.store.run("UPDATE agent_instances SET error_count=0,retry_at=NULL,last_error=NULL,state='listening' WHERE id=?",agentId);
+      this.wake(agentId,'RECOVERY'); this.trace(session,agentId,null,'MANUAL_AGENT_RETRY'); return {ok:true};
+    });
+  }
+  private activeElapsed(s:SessionRow):number { return s.active_elapsed_ms+(s.active_since!==null?Math.max(0,this.now()-s.active_since):0); }
+  private stopClock(id:string):void {
+    const s=this.session(id); this.store.run('UPDATE sessions SET active_elapsed_ms=?,active_since=NULL WHERE id=?',this.activeElapsed(s),id);
+  }
+  renewBudget(id:string,key:string):PublicSession {
+    return this.receipt(`operator:${id}:budget`,key,{},()=>{
+      const s=this.session(id); ensure(s.lifecycle==='DRAFT'||s.lifecycle==='PAUSED',409,'PAUSE_REQUIRED');
+      this.stopClock(id);
+      this.store.run("UPDATE sessions SET active_elapsed_ms=0,window_call_start=call_count,window_post_start=bot_count,stop_reason=NULL,activity='QUIET',epoch=epoch+1 WHERE id=?",id);
+      this.cancelRuns(id,'BUDGET_RENEWED'); this.emit(id,'budget.renewed',{}); return this.publicSession(this.session(id));
+    });
+  }
   private selfWake(settings: ReturnType<typeof settingsOf>): number {
     return this.now()+settings.selfWakeMinMs+Math.floor(this.random()*(settings.selfWakeMaxMs-settings.selfWakeMinMs));
   }
@@ -72,14 +130,14 @@ export class SessionService {
       const definitions=this.characters();
       for (const p of data.participants) {
         ensure(definitions.some(c=>c.id===p.characterId),422,'UNKNOWN_CHARACTER');
-        const profile=this.config.profiles.find(m=>m.id===p.profileId);
+        const profile=this.modelProfiles().find(m=>m.id===p.profileId);
         ensure(profile,422,'UNKNOWN_MODEL_PROFILE'); ensure(profile.provider==='mock'||this.config.allowLive,403,'LIVE_DISABLED');
         ensure(this.config.workerTokens[p.slot],422,'UNKNOWN_WORKER_SLOT');
       }
       this.store.run('INSERT INTO sessions(id,title,created_at,last_activity_at,settings_json,lifecycle) VALUES(?,?,?,?,?,?)',id,data.title,now,now,JSON.stringify(data.settings),'DRAFT');
       for(const p of data.participants) {
         this.store.run('INSERT INTO agent_instances(id,session_id,slot,character_json,profile_json,next_self_at) VALUES(?,?,?,?,?,?)',
-          randomUUID(),id,p.slot,JSON.stringify(definitions.find(c=>c.id===p.characterId)),JSON.stringify(this.config.profiles.find(m=>m.id===p.profileId)),this.selfWake(data.settings));
+          randomUUID(),id,p.slot,JSON.stringify(definitions.find(c=>c.id===p.characterId)),JSON.stringify(this.modelProfiles().find(m=>m.id===p.profileId)),this.selfWake(data.settings));
       }
       this.emit(id,'session.created',{}); return {id};
     });
@@ -94,13 +152,14 @@ export class SessionService {
     }
   }
   private pauseForLimit(id: string, reason: string): void {
+    this.stopClock(id);
     this.store.run("UPDATE sessions SET lifecycle='PAUSED',activity='BUDGET_PAUSED',stop_reason=?,epoch=epoch+1 WHERE id=?",reason,id);
     this.cancelRuns(id,'BUDGET_CANCELLED');
     this.store.run("UPDATE candidates SET state='NEEDS_REVIEW' WHERE session_id=? AND state='READY'",id);
     this.store.run("UPDATE agent_instances SET state='paused' WHERE session_id=?",id);
     this.emit(id,'budget.paused',{reason});
   }
-  private timeExceeded(s: SessionRow): boolean { return s.started_at!==null && this.now()-s.started_at>=settingsOf(s).maxDurationMs; }
+  private timeExceeded(s: SessionRow): boolean { return this.activeElapsed(s)>=settingsOf(s).maxDurationMs; }
   lifecycle(id: string, action: 'start'|'pause'|'resume'|'end', key: string): PublicSession {
     this.session(id);
     return this.receipt(`operator:${id}:lifecycle`,key,{action},()=>{
@@ -109,11 +168,12 @@ export class SessionService {
       ensure(allowed[action].includes(s.lifecycle),409,'INVALID_LIFECYCLE');
       if(action==='start'||action==='resume') {
         const st=settingsOf(s);
-        ensure(s.call_count<st.maxCalls&&s.bot_count<st.maxMessages&&!this.timeExceeded(s),409,'LIMIT_ALREADY_REACHED');
+        ensure(s.call_count-s.window_call_start<st.maxCalls&&s.bot_count-s.window_post_start<st.maxMessages&&!this.timeExceeded(s),409,'LIMIT_ALREADY_REACHED');
         const count=this.store.get<{n:number}>("SELECT COUNT(*) n FROM sessions WHERE lifecycle='RUNNING' AND id<>?",id)!.n;
         ensure(count<this.config.maxRunning,409,'RUNNING_SESSION_LIMIT');
-        this.store.run("UPDATE sessions SET lifecycle='RUNNING',activity='ACTIVE',stop_reason=NULL,epoch=epoch+1,started_at=COALESCE(started_at,?) WHERE id=?",this.now(),id);
+        this.store.run("UPDATE sessions SET lifecycle='RUNNING',activity='ACTIVE',stop_reason=NULL,epoch=epoch+1,started_at=COALESCE(started_at,?),active_since=? WHERE id=?",this.now(),this.now(),id);
       } else {
+        this.stopClock(id);
         this.store.run('UPDATE sessions SET lifecycle=?,epoch=epoch+1,stop_reason=? WHERE id=?',action==='end'?'ENDED':'PAUSED',action==='end'?'ENDED':'USER_PAUSED',id);
       }
       this.cancelRuns(id,'LIFECYCLE_CHANGED');
@@ -155,6 +215,7 @@ export class SessionService {
         this.store.run('UPDATE sessions SET epoch=epoch+1 WHERE id=?',s.id);
         this.store.run("UPDATE candidates SET state='NEEDS_REVIEW' WHERE session_id=? AND state='READY'",s.id);
         if(this.config.restartPolicy==='paused') {
+          this.stopClock(s.id);
           this.store.run("UPDATE sessions SET lifecycle='PAUSED',stop_reason='RECOVERY_REQUIRES_RESUME' WHERE id=?",s.id);
         } else for(const a of this.agents(s.id)) if(a.enabled) this.wake(a.id,'RECOVERY');
         this.emit(s.id,'session.recovered',{policy:this.config.restartPolicy});
@@ -176,7 +237,7 @@ export class SessionService {
     }
     const pending=a.wake_seq>a.processed_wake;
     const due=coalesceDue(pending?a.pending_since:null,pending?a.due_at:null,this.now(),trigger==='DIRECTED'?st.directedDebounceMs:st.debounceMs,st.maxCoalesceMs);
-    this.store.run('UPDATE agent_instances SET dirty_revision=?,wake_seq=wake_seq+1,pending_since=?,due_at=?,trigger=?,error_count=0 WHERE id=?',
+    this.store.run('UPDATE agent_instances SET dirty_revision=?,wake_seq=wake_seq+1,pending_since=?,due_at=?,trigger=? WHERE id=?',
       s.revision,due.since,deferral?deferral.until:due.due,trigger,a.id);
     this.store.run("UPDATE candidates SET state='NEEDS_REVIEW' WHERE agent_id=? AND state='READY'",a.id);
   }
@@ -193,9 +254,12 @@ export class SessionService {
     const s=this.session(session),now=this.now();
     const episode=s.revision>0&&now-s.last_activity_at>=settingsOf(s).episodeGapMs?s.episode+1:s.episode;
     const id=randomUUID(),revision=s.revision+1;
+    const sequence=this.store.get<{message_seq:number}>('SELECT message_seq FROM sessions WHERE id=?',session)!.message_seq+1;
+    const threadRoot=intent.replyTo?this.store.get<MessageRow>('SELECT * FROM messages WHERE id=?',intent.replyTo)!.thread_root:id;
+    this.store.run('UPDATE sessions SET message_seq=? WHERE id=?',sequence,session);
     this.store.run('UPDATE sessions SET revision=?,last_activity_at=?,last_post_at=?,episode=?,activity=? WHERE id=?',revision,now,now,episode,'ACTIVE',session);
-    this.store.run('INSERT INTO messages(id,session_id,revision,author_id,text,act,reply_to,addressed_json,candidate_id,episode,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-      id,session,revision,author,text,intent.act,intent.replyTo,JSON.stringify(intent.addressedTo),candidateId,episode,now);
+    this.store.run('INSERT INTO messages(id,session_id,revision,author_id,text,act,reply_to,addressed_json,candidate_id,episode,created_at,sequence,thread_root) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      id,session,revision,author,text,intent.act,intent.replyTo,JSON.stringify(intent.addressedTo),candidateId,episode,now,sequence,threadRoot);
     this.store.run('INSERT INTO messages_fts(message_id,session_id,text) VALUES(?,?,?)',id,session,text);
     if(intent.act==='question') for(const target of intent.addressedTo.length?intent.addressedTo:['*']) this.store.run('INSERT INTO pending_questions(message_id,target) VALUES(?,?)',id,target);
     if(intent.replyTo&&['answer','correction'].includes(intent.act)) this.store.run("UPDATE pending_questions SET answered_by=? WHERE message_id=? AND (target=? OR target='*') AND answered_by IS NULL",id,intent.replyTo,author??'human');
@@ -219,7 +283,7 @@ export class SessionService {
       const s=this.session(session),m=this.store.get<MessageRow>('SELECT * FROM messages WHERE id=?',messageId);
       ensure(s.lifecycle!=='ENDED',409,'SESSION_ENDED'); ensure(m&&m.session_id===session&&!m.deleted,404,'MESSAGE_NOT_FOUND');
       ensure(text===null||m.author_id===null,403,'BOT_TEXT_IMMUTABLE');
-      this.store.run('UPDATE sessions SET revision=revision+1 WHERE id=?',session);
+      this.store.run('UPDATE sessions SET revision=revision+1,edit_generation=edit_generation+1 WHERE id=?',session);
       this.store.run('UPDATE messages SET text=?,deleted=?,revision=? WHERE id=?',text??'',text===null?1:0,s.revision+1,messageId);
       this.store.run('DELETE FROM messages_fts WHERE message_id=?',messageId);
       this.store.run('DELETE FROM memories WHERE EXISTS (SELECT 1 FROM json_each(memories.sources_json) WHERE value=?)',messageId);
@@ -244,7 +308,7 @@ export class SessionService {
   registerWorker(slot: string): {epoch:number} {
     ensure(this.config.workerTokens[slot],403,'WORKER_FORBIDDEN');
     return this.write(()=>{
-      this.store.run('UPDATE workers SET epoch=epoch+1 WHERE slot=?',slot);
+      this.store.run('UPDATE workers SET epoch=epoch+1,last_seen_at=? WHERE slot=?',this.now(),slot);
       for(const a of this.store.all<AgentRow>('SELECT * FROM agent_instances WHERE slot=?',slot)) {
         this.cancelRuns(a.session_id,'WORKER_REPLACED',slot);
         if(this.session(a.session_id).lifecycle==='RUNNING') this.wake(a.id,'RECOVERY');
@@ -267,20 +331,29 @@ export class SessionService {
   }
   private context(agent: AgentRow, candidate?: CandidateRow): Context {
     const s=this.session(agent.session_id),st=settingsOf(s);
-    let rows=this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT ?',s.id,st.contextMessages).reverse();
+    let rows=this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY sequence DESC LIMIT ?',s.id,st.contextMessages).reverse();
     let chars=rows.reduce((n,m)=>n+m.text.length,0);
     while(rows.length>1&&chars>st.contextChars/2) { chars-=rows[0].text.length; rows.shift(); }
     const messages=rows.map(m=>this.publicMessage(m));
-    const memories=this.workerMemories(agent.slot,agent.id).slice(-12);
+    const memories=this.pages.memories(agent.id,'',{limit:12}).items.reverse();
     const questions=this.store.all<{message_id:string;text:string;author_id:string|null}>(
       "SELECT q.message_id,m.text,m.author_id FROM pending_questions q JOIN messages m ON m.id=q.message_id WHERE m.session_id=? AND m.deleted=0 AND q.answered_by IS NULL AND (q.target=? OR q.target='*') ORDER BY m.revision DESC LIMIT 8",s.id,agent.id)
       .map(q=>({messageId:q.message_id,text:q.text.slice(0,800),from:q.author_id}));
     const sources=this.store.all<{id:string;title:string;text:string;url:string|null;published_at:string|null;fetched_at:number}>(
       'SELECT * FROM source_items WHERE session_id=? ORDER BY fetched_at DESC,rowid DESC LIMIT 4',s.id)
       .map(x=>({id:x.id,title:x.title,text:x.text.slice(0,1600),url:x.url,publishedAt:x.published_at,fetchedAt:x.fetched_at}));
-    const delta=candidate?this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? AND revision>? ORDER BY revision LIMIT 100',s.id,candidate.reviewed_revision).map(m=>this.publicMessage(m)):[];
+    const changed=candidate?this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? AND revision>? ORDER BY revision LIMIT 101',s.id,candidate.reviewed_revision):[];
+    const delta:PublicMessage[]=[]; let size=0;
+    for(const row of changed) {
+      const m=this.publicMessage(row),cost=JSON.stringify(m).length;
+      if(delta.length&&(delta.length>=100||size+cost>st.contextChars/3)) break;
+      delta.push(m);size+=cost;
+    }
+    const complete=delta.length===changed.length;
+    const through=candidate?(complete?s.revision:delta.at(-1)!.revision):s.revision;
+    const coverage=candidate?{fromRevision:candidate.reviewed_revision,throughRevision:through,targetRevision:s.revision,complete}:undefined;
     return {self:{id:agent.id,character:characterOf(agent)},participants:this.agents(s.id).filter(a=>a.enabled).map(a=>this.publicAgent(a)),
-      revision:s.revision,trigger:agent.trigger,messages,delta,historyTruncated:rows.length>0&&rows[0].revision>1,
+      revision:s.revision,trigger:agent.trigger,messages,delta,...coverage?{coverage}:{},historyTruncated:rows.length>0&&rows[0].revision>1,
       memories,questions,sources,candidate:candidate?{id:candidate.id,version:candidate.version,intent:intentOf(candidate),text:candidate.text,reviewedRevision:candidate.reviewed_revision}:null};
   }
   private claimed(r: RunRow): ClaimedRun {
@@ -292,11 +365,12 @@ export class SessionService {
     this.tick();
     return this.write(()=>{
       this.verifyEpoch(slot,epoch);
+      this.store.run('UPDATE workers SET last_seen_at=? WHERE slot=?',this.now(),slot);
       const old=this.store.get<RunRow>("SELECT * FROM runs WHERE slot=? AND state='ACTIVE'",slot);
       if(old) return this.claimed(old);
       for(const a of this.store.all<AgentRow>("SELECT a.* FROM agent_instances a JOIN sessions s ON s.id=a.session_id WHERE a.slot=? AND a.enabled=1 AND s.lifecycle='RUNNING' ORDER BY a.rowid",slot)) {
         const s=this.session(a.session_id),st=settingsOf(s),c=this.candidate(a.id);
-        if(a.error_count>st.maxRetries||a.deferral_json||(a.due_at!==null&&a.due_at>this.now())) continue;
+        if(!this.providers.mayClaim(profileOf(a),a.error_count,st.maxRetries)||a.deferral_json||(a.retry_at!==null&&a.retry_at>this.now())||(a.due_at!==null&&a.due_at>this.now())) continue;
         let kind: RunKind|undefined;
         if(c?.state==='DRAFTING') kind='draft';
         else if(c?.state==='NEEDS_REVIEW') kind=c.text?'review':'draft';
@@ -306,7 +380,7 @@ export class SessionService {
         if(!kind) continue;
         const id=randomUUID(),token=randomUUID(),context=this.context(a,c);
         this.store.run('INSERT INTO runs(id,agent_id,session_id,slot,worker_epoch,session_epoch,kind,token,state,snapshot_revision,wake_seq,candidate_id,candidate_version,created_at,lease_until,context_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-          id,a.id,s.id,slot,epoch,s.epoch,kind,token,'ACTIVE',s.revision,a.wake_seq,c?.id??null,c?.version??null,this.now(),this.now()+st.leaseMs,JSON.stringify(context));
+          id,a.id,s.id,slot,epoch,s.epoch,kind,token,'ACTIVE',context.coverage?.throughRevision??s.revision,a.wake_seq,c?.id??null,c?.version??null,this.now(),this.now()+st.leaseMs,JSON.stringify(context));
         this.store.run('UPDATE agent_instances SET state=? WHERE id=?',kind==='review'?'reviewing':kind==='memory'?'remembering':'thinking',a.id);
         this.trace(s.id,a.id,id,'RUN_STARTED',{kind,revision:s.revision}); this.emit(s.id,'agent.status',{agentId:a.id,status:kind==='review'?'reviewing':'thinking'});
         return this.claimed(this.store.get<RunRow>('SELECT * FROM runs WHERE id=?',id)!);
@@ -315,36 +389,58 @@ export class SessionService {
     });
   }
   heartbeat(slot: string, epoch: number, id: string, token: string): {ok:true} {
-    return this.write(()=>{ const r=this.validRun(slot,epoch,id,token); this.store.run('UPDATE runs SET lease_until=? WHERE id=?',this.now()+settingsOf(this.session(r.session_id)).leaseMs,id); return {ok:true}; });
+    return this.write(()=>{ const r=this.validRun(slot,epoch,id,token); this.store.run('UPDATE workers SET last_seen_at=? WHERE slot=?',this.now(),slot); this.store.run('UPDATE runs SET lease_until=? WHERE id=?',this.now()+settingsOf(this.session(r.session_id)).leaseMs,id); return {ok:true}; });
   }
-  reserveCall(slot: string, epoch: number, id: string, token: string, requestKey: string, stage: 'primary'|'repair'): {id:string} {
+  reserveCall(slot: string, epoch: number, id: string, token: string, requestKey: string, stage: 'primary'|'repair'|'lookup'): {id:string} {
     const result=this.write(()=>{
       const r=this.validRun(slot,epoch,id,token),s=this.session(r.session_id),p=profileOf(this.agent(r.agent_id)),st=settingsOf(s);
       const old=this.store.get<CallRow>('SELECT * FROM llm_calls WHERE run_id=? AND request_key=?',id,requestKey);
       if(old) { ensure(old.stage===stage,409,'IDEMPOTENCY_CONFLICT'); return {id:old.id}; }
-      if(this.timeExceeded(s)||s.call_count>=st.maxCalls) { this.pauseForLimit(s.id,this.timeExceeded(s)?'MAX_DURATION':'MAX_CALLS'); return {blocked:true}; }
+      if(this.timeExceeded(s)||s.call_count-s.window_call_start>=st.maxCalls) { this.pauseForLimit(s.id,this.timeExceeded(s)?'MAX_DURATION':'MAX_CALLS'); return {blocked:true}; }
       const previous=this.store.all<CallRow>('SELECT * FROM llm_calls WHERE run_id=?',id);
-      ensure(previous.length<2&&!previous.some(c=>c.stage===stage),409,'CALL_ATTEMPT_LIMIT');
-      ensure(stage==='primary'?previous.length===0:previous.some(c=>c.stage==='primary'&&c.status==='FINISHED'&&!c.error_code),409,'INVALID_REPAIR');
-      const scope=p.provider==='mock'?'mock':new URL(p.baseUrl!).origin;
-      const active=this.store.get<{n:number}>("SELECT COUNT(*) n FROM llm_calls WHERE scope=? AND status IN ('RESERVED','ABANDONED') AND expires_at>?",scope,this.now())!.n;
-      ensure(active<this.config.maxConcurrentProvider,429,'PROVIDER_BUSY');
+      ensure(previous.length<4,409,'CALL_ATTEMPT_LIMIT');
+      ensure(stage==='primary'?previous.length===0:stage==='repair'?!previous.some(c=>c.stage==='repair')&&previous.some(c=>c.status==='FINISHED'&&!c.error_code):r.retrieval_count>previous.filter(c=>c.stage==='lookup').length&&r.retrieval_count<=2,409,'INVALID_CALL_STAGE');
       ensure(!previous.some(c=>['RESERVED','ABANDONED'].includes(c.status)&&c.expires_at>this.now()),429,'RUN_BUSY');
-      const callId=randomUUID();
-      this.store.run('INSERT INTO llm_calls(id,run_id,request_key,scope,stage,status,started_at,expires_at) VALUES(?,?,?,?,?,?,?,?)',callId,id,requestKey,scope,stage,'RESERVED',this.now(),this.now()+st.requestTimeoutMs+10000);
+      const scope=providerScope(p),callId=randomUUID();
+      this.providers.reserve(p,callId,this.now()+st.requestTimeoutMs+10000,Math.min(p.maxConcurrent,this.config.maxConcurrentProvider));
+      this.store.run('INSERT INTO llm_calls(id,run_id,request_key,scope,stage,status,started_at,expires_at,context_hash) VALUES(?,?,?,?,?,?,?,?,?)',callId,id,requestKey,scope,stage,'RESERVED',this.now(),this.now()+st.requestTimeoutMs+10000,hash(r.context_json));
       this.store.run('UPDATE sessions SET call_count=call_count+1 WHERE id=?',s.id);
       this.trace(s.id,r.agent_id,r.id,'CALL_RESERVED',{kind:r.kind,stage,provider:p.provider}); return {id:callId};
     });
     if('blocked' in result) throw new AppError(409,'BUDGET_STOPPED'); return result;
   }
-  finishCall(slot: string, id: string, token: string, callId: string, usage: Usage, error: ModelErrorCode|null): {ok:true} {
+  finishCall(slot: string, id: string, token: string, callId: string, usage: Usage, error: ModelErrorCode|null, retryAfterMs=0): {ok:true} {
     return this.write(()=>{
       const r=this.ownRun(slot,id,token),c=this.store.get<CallRow>('SELECT * FROM llm_calls WHERE id=?',callId);
-      ensure(c&&c.run_id===r.id,403,'CALL_FORBIDDEN'); const digest=hash({usage,error});
+      ensure(c&&c.run_id===r.id,403,'CALL_FORBIDDEN'); const digest=hash({usage,error,retryAfterMs});
       if(c.result_hash) { ensure(c.result_hash===digest,409,'IDEMPOTENCY_CONFLICT'); return {ok:true}; }
       this.store.run('UPDATE llm_calls SET status=?,finished_at=?,input_tokens=?,output_tokens=?,error_code=?,result_hash=? WHERE id=?',
         error==='TIMEOUT'||error==='CANCELLED'?'ABANDONED':'FINISHED',this.now(),usage.inputTokens,usage.outputTokens,error,digest,callId);
+      this.providers.finish(profileOf(this.agent(r.agent_id)),callId,error,retryAfterMs);
       return {ok:true};
+    });
+  }
+  retrieve(slot:string,epoch:number,id:string,token:string,key:string,requests:LookupRequest[]):Context {
+    const parsed=LookupSchema.parse({decision:'LOOKUP',requests});
+    return this.receipt(`worker:${slot}:${id}:lookup`,key,parsed,()=>{
+      const r=this.validRun(slot,epoch,id,token); ensure(r.retrieval_count<2&&r.kind!=='memory',409,'LOOKUP_LIMIT');
+      ensure(this.store.get('SELECT id FROM llm_calls WHERE run_id=? AND status=\'FINISHED\' AND error_code IS NULL',id),409,'MODEL_CALL_NOT_RECORDED');
+      const results:RetrievalResult[]=parsed.requests.map(request=>{
+        if(request.kind==='message') return {request,messages:[this.archiveMessage(r.session_id,request.query)],memories:[],nextCursor:null};
+        if(request.kind==='memories') {
+          const page=this.pages.memories(r.agent_id,request.query,{limit:2,cursor:request.cursor});
+          const sources=[...new Set(page.items.flatMap(x=>x.sourceMessageIds))].slice(0,4);
+          return {request,memories:page.items,messages:sources.map(x=>this.archiveMessage(r.session_id,x)),nextCursor:page.nextCursor};
+        }
+        const page=this.pages.search(r.session_id,request.query,{limit:2,cursor:request.cursor});
+        return {request,messages:page.items,memories:[],nextCursor:page.nextCursor};
+      });
+      const context=JSON.parse(r.context_json) as Context;
+      context.retrieved=[...(context.retrieved??[]),...results];
+      // The model adapter may trim optional recent context, never review or retrieval evidence.
+      ensure(JSON.stringify(context.retrieved).length<=settingsOf(this.session(r.session_id)).contextChars,422,'LOOKUP_CONTEXT_LIMIT');
+      this.store.run('UPDATE runs SET context_json=?,retrieval_count=retrieval_count+1 WHERE id=?',JSON.stringify(context),id);
+      this.trace(r.session_id,r.agent_id,id,'ARCHIVE_RETRIEVED',{requests:requests.length}); return context;
     });
   }
   private defer(agentId: string, value: Deferral): void {
@@ -360,7 +456,7 @@ export class SessionService {
       const existing=this.ownRun(slot,id,token);
       if(existing.state==='DONE') { ensure(existing.result_hash===digest,409,'IDEMPOTENCY_CONFLICT'); return {ok:true}; }
       const r=this.validRun(slot,epoch,id,token),s=this.session(r.session_id),st=settingsOf(s),a=this.agent(r.agent_id);
-      ensure(this.store.get<{n:number}>("SELECT COUNT(*) n FROM llm_calls WHERE run_id=? AND status='FINISHED' AND error_code IS NULL",id)!.n>0,409,'MODEL_CALL_NOT_RECORDED');
+      ensure(this.store.get<{n:number}>("SELECT COUNT(*) n FROM llm_calls WHERE run_id=? AND status='FINISHED' AND error_code IS NULL AND context_hash=?",id,hash(r.context_json))!.n>0,409,'MODEL_CALL_NOT_RECORDED');
       const c=r.candidate_id?this.store.get<CandidateRow>('SELECT * FROM candidates WHERE id=?',r.candidate_id):undefined;
       if(r.candidate_id) ensure(c&&c.version===r.candidate_version&&c.agent_id===r.agent_id&&!['COMMITTED','DROPPED'].includes(c.state),409,'STALE_CANDIDATE');
       const ready=r.snapshot_revision===s.revision&&r.wake_seq===a.wake_seq;
@@ -399,10 +495,13 @@ export class SessionService {
             ensure(m&&m.session_id===s.id&&!m.deleted&&m.revision<=r.snapshot_revision,422,'INVALID_MEMORY_SOURCE');
           }
           const sources=JSON.stringify([...new Set(note.sourceMessageIds)].sort());
-          if(!this.store.get('SELECT id FROM memories WHERE agent_id=? AND text=? AND sources_json=?',a.id,note.text,sources))
-            this.store.run('INSERT INTO memories(id,agent_id,text,sources_json,created_at) VALUES(?,?,?,?,?)',randomUUID(),a.id,note.text,sources,this.now());
+          if(!this.store.get('SELECT id FROM memories WHERE agent_id=? AND text=? AND sources_json=?',a.id,note.text,sources)) {
+            this.store.run('UPDATE agent_instances SET memory_seq=memory_seq+1 WHERE id=?',a.id);
+            const sequence=this.store.get<{memory_seq:number}>('SELECT memory_seq FROM agent_instances WHERE id=?',a.id)!.memory_seq;
+            this.store.run('INSERT INTO memories(id,agent_id,text,sources_json,created_at,sequence) VALUES(?,?,?,?,?,?)',randomUUID(),a.id,note.text,sources,this.now(),sequence);
+          }
         }
-        this.store.run('DELETE FROM memories WHERE agent_id=? AND id NOT IN (SELECT id FROM memories WHERE agent_id=? ORDER BY created_at DESC,rowid DESC LIMIT 50)',a.id,a.id);
+        // Retention is separate from prompt selection. Never evict old memories to limit a prompt.
         this.store.run('UPDATE agent_instances SET memory_revision=? WHERE id=?',r.snapshot_revision,a.id);
         this.trace(s.id,a.id,id,'MEMORY_SAVED',{notes:result.notes.length});
       }
@@ -411,7 +510,7 @@ export class SessionService {
       const next=this.agent(a.id),cand=this.candidate(a.id);
       const status=next.deferral_json||cand?'waiting':'listening';
       const due=next.deferral_json?next.due_at:cand&&cand.state!=='READY'?this.now():next.wake_seq>next.processed_wake?(next.due_at??this.now()):null;
-      this.store.run('UPDATE agent_instances SET error_count=0,state=?,due_at=?,pending_since=CASE WHEN wake_seq<=processed_wake THEN NULL ELSE pending_since END WHERE id=?',status,due,a.id);
+      this.store.run('UPDATE agent_instances SET error_count=0,retry_at=NULL,last_error=NULL,state=?,due_at=?,pending_since=CASE WHEN wake_seq<=processed_wake THEN NULL ELSE pending_since END WHERE id=?',status,due,a.id);
       this.emit(s.id,'agent.status',{agentId:a.id,status}); return {ok:true};
     });
   }
@@ -421,8 +520,9 @@ export class SessionService {
       const r=this.validRun(slot,epoch,id,token),a=this.agent(r.agent_id),st=settingsOf(this.session(r.session_id));
       this.store.run("UPDATE runs SET state='FAILED',result_json=? WHERE id=?",JSON.stringify({code}),id);
       this.store.run("UPDATE llm_calls SET status='ABANDONED' WHERE run_id=? AND status='RESERVED'",id);
+      if(code==='CONFIG_ERROR')this.providers.finish(profileOf(a),id,code);
       const count=a.error_count+1;
-      this.store.run('UPDATE agent_instances SET error_count=?,state=?,due_at=?,wake_seq=wake_seq+1 WHERE id=?',count,count>st.maxRetries?'error':'retrying',this.now()+retryDelay(count),a.id);
+      this.store.run('UPDATE agent_instances SET error_count=?,state=?,retry_at=?,last_error=?,wake_seq=wake_seq+1 WHERE id=?',count,count>st.maxRetries?'error':'retrying',Math.max(this.now()+retryDelay(count),this.providers.status(profileOf(a)).retryAt??0),code,a.id);
       this.store.run("UPDATE sessions SET activity='DEGRADED' WHERE id=?",r.session_id);
       this.trace(r.session_id,a.id,id,code,{retry:count<=st.maxRetries}); this.emit(r.session_id,'agent.status',{agentId:a.id,status:'error',code}); return {ok:true};
     });
@@ -431,9 +531,9 @@ export class SessionService {
     let s=this.session(id); if(s.lifecycle!=='RUNNING') return null;
     const st=settingsOf(s);
     if(this.timeExceeded(s)) { this.pauseForLimit(id,'MAX_DURATION'); return null; }
-    if(s.bot_count>=st.maxMessages) { this.pauseForLimit(id,'MAX_MESSAGES'); return null; }
+    if(s.bot_count-s.window_post_start>=st.maxMessages) { this.pauseForLimit(id,'MAX_MESSAGES'); return null; }
     if(this.now()<s.last_post_at+st.postGapMs) return null;
-    const latest=this.store.get<MessageRow>('SELECT * FROM messages WHERE session_id=? AND deleted=0 ORDER BY rowid DESC LIMIT 1',id);
+    const latest=this.store.get<MessageRow>('SELECT * FROM messages WHERE session_id=? AND deleted=0 ORDER BY sequence DESC LIMIT 1',id);
     const targets=latest?JSON.parse(latest.addressed_json) as string[]:[];
     const all=this.store.all<CandidateRow>("SELECT * FROM candidates WHERE session_id=? AND state='READY'",id);
     const eligible=all.map(c=>{ const a=this.agent(c.agent_id); return {
@@ -452,7 +552,7 @@ export class SessionService {
     this.store.run('UPDATE sessions SET bot_count=bot_count+1 WHERE id=?',id);
     this.store.run("UPDATE agent_instances SET state='listening' WHERE id=?",c.agent_id);
     this.trace(id,c.agent_id,null,'COMMITTED',{candidateId:c.id,version:c.version,revision:message.revision,waitMs:this.now()-c.first_interested_at});
-    s=this.session(id); if(s.bot_count>=st.maxMessages) this.pauseForLimit(id,'MAX_MESSAGES');
+    s=this.session(id); if(s.bot_count-s.window_post_start>=st.maxMessages) this.pauseForLimit(id,'MAX_MESSAGES');
     return message;
   }
   commitNext(id: string): PublicMessage|null { return this.write(()=>this.commitOne(id)); }
@@ -477,7 +577,7 @@ export class SessionService {
           if(!busy&&!a.deferral_json&&a.wake_seq===a.processed_wake&&a.error_count===0) {
             if(this.now()-s.last_activity_at>=st.idleMs&&a.idle_checked<s.revision) {
               this.store.run('UPDATE agent_instances SET idle_checked=? WHERE id=?',s.revision,a.id); this.wake(a.id,'IDLE');
-            } else if(this.now()>=a.next_self_at) {
+            } else if(st.selfWakeEnabled&&this.now()>=a.next_self_at) {
               this.store.run('UPDATE agent_instances SET next_self_at=? WHERE id=?',this.selfWake(st),a.id); this.wake(a.id,'SELF_WAKE');
             }
           }
@@ -486,7 +586,7 @@ export class SessionService {
         const agents=this.agents(s.id).filter(a=>a.enabled);
         const busy=agents.some(a=>a.wake_seq>a.processed_wake&&a.error_count<=settingsOf(s).maxRetries||!!this.candidate(a.id))||
           !!this.store.get("SELECT id FROM runs WHERE session_id=? AND state='ACTIVE'",s.id);
-        const activity=agents.some(a=>a.error_count>0)?'DEGRADED':busy?'ACTIVE':'QUIET';
+        const activity=agents.some(a=>a.error_count>0||!this.publicAgent(a).workerOnline)?'DEGRADED':busy?'ACTIVE':'QUIET';
         if(activity!==s.activity) { this.store.run('UPDATE sessions SET activity=? WHERE id=?',activity,s.id); this.emit(s.id,'session.activity',{activity}); }
       }
     });
@@ -509,17 +609,22 @@ export class SessionService {
       'SELECT * FROM messages WHERE session_id=? AND deleted=0 AND instr(text,?)>0 ORDER BY revision DESC LIMIT 50',session,query);
     return rows.map(m=>this.publicMessage(m));
   }
-  publicAgent(a: AgentRow): PublicAgent { const c=characterOf(a); return {id:a.id,slot:a.slot,characterId:c.id,characterVersion:c.version,name:c.name,presentationRef:c.presentationRef,profileId:profileOf(a).id,enabled:!!a.enabled,status:a.state}; }
-  publicSession(s: SessionRow): PublicSession { return {id:s.id,title:s.title,lifecycle:s.lifecycle,activity:s.activity,revision:s.revision,epoch:s.epoch,createdAt:s.created_at,startedAt:s.started_at,stopReason:s.stop_reason,calls:s.call_count,botMessages:s.bot_count,settings:settingsOf(s),mode:this.agents(s.id).some(a=>profileOf(a).provider!=='mock')?'live':'mock'}; }
+  publicAgent(a: AgentRow): PublicAgent {
+    const c=characterOf(a),last=this.store.get<{last_seen_at:number|null}>('SELECT last_seen_at FROM workers WHERE slot=?',a.slot)?.last_seen_at??null;
+    return {id:a.id,slot:a.slot,characterId:c.id,characterVersion:c.version,name:c.name,presentationRef:c.presentationRef,profileId:profileOf(a).id,enabled:!!a.enabled,status:a.state,
+      workerOnline:last!==null&&this.now()-last<=Math.max(15000,settingsOf(this.session(a.session_id)).leaseMs),lastSeenAt:last,nextRetryAt:a.retry_at};
+  }
+  publicSession(s: SessionRow): PublicSession { return {id:s.id,title:s.title,lifecycle:s.lifecycle,activity:s.activity,revision:s.revision,epoch:s.epoch,createdAt:s.created_at,startedAt:s.started_at,stopReason:s.stop_reason,calls:s.call_count,botMessages:s.bot_count,
+    budget:{callsUsed:s.call_count-s.window_call_start,messagesUsed:s.bot_count-s.window_post_start,activeMs:this.activeElapsed(s)},settings:settingsOf(s),mode:this.agents(s.id).some(a=>profileOf(a).provider!=='mock')?'live':'mock'}; }
   publicMessage(m: MessageRow): PublicMessage {
     const a=m.author_id?this.agent(m.author_id):null,c=a?characterOf(a):null;
-    return {id:m.id,sessionId:m.session_id,revision:m.revision,authorId:m.author_id,authorName:c?.name??'あなた',characterId:c?.id??null,characterVersion:c?.version??null,text:m.deleted?'':m.text,act:m.act,replyTo:m.reply_to,addressedTo:JSON.parse(m.addressed_json) as string[],deleted:!!m.deleted,episode:m.episode,createdAt:m.created_at};
+    return {id:m.id,sessionId:m.session_id,sequence:m.sequence,threadRootId:m.thread_root,revision:m.revision,authorId:m.author_id,authorName:c?.name??'あなた',characterId:c?.id??null,characterVersion:c?.version??null,text:m.deleted?'':m.text,act:m.act,replyTo:m.reply_to,addressedTo:JSON.parse(m.addressed_json) as string[],deleted:!!m.deleted,episode:m.episode,createdAt:m.created_at};
   }
   listSessions(): PublicSession[] { return this.store.all<SessionRow>('SELECT * FROM sessions ORDER BY created_at DESC,rowid DESC').map(s=>this.publicSession(s)); }
   private cursor(session: string, n: number): string { return session+':'+n; }
   snapshot(id: string): Snapshot {
     return this.store.tx(()=>({session:this.publicSession(this.session(id)),agents:this.agents(id).map(a=>this.publicAgent(a)),
-      messages:this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT 200',id).reverse().map(m=>this.publicMessage(m)),
+      messages:this.pages.history(id,{limit:200}).items,historyCursor:this.pages.history(id,{limit:200}).nextCursor,
       cursor:this.cursor(id,this.store.get<{n:number}>('SELECT COALESCE(MAX(id),0) n FROM events WHERE session_id=?',id)!.n)}));
   }
   eventsAfter(id: string, cursor: string, limit=100): PublicEvent[] {
@@ -536,7 +641,7 @@ export class SessionService {
   }
   diagnostics(id: string): Record<string,unknown> {
     this.session(id);
-    return {agents:this.agents(id).map(a=>({id:a.id,slot:a.slot,state:a.state,processedRevision:a.processed_revision,dirtyRevision:a.dirty_revision,wakeSeq:a.wake_seq,processedWake:a.processed_wake,dueAt:a.due_at,errorCount:a.error_count,deferral:a.deferral_json?JSON.parse(a.deferral_json):null})),
+    return {providers:this.providerDiagnostics(),agents:this.agents(id).map(a=>({id:a.id,slot:a.slot,state:a.state,workerOnline:this.publicAgent(a).workerOnline,nextRetryAt:a.retry_at,lastError:a.last_error,processedRevision:a.processed_revision,dirtyRevision:a.dirty_revision,wakeSeq:a.wake_seq,processedWake:a.processed_wake,dueAt:a.due_at,errorCount:a.error_count,deferral:a.deferral_json?JSON.parse(a.deferral_json):null})),
       candidates:this.store.all<CandidateRow>('SELECT * FROM candidates WHERE session_id=? ORDER BY first_interested_at DESC LIMIT 30',id),
       runs:this.store.all('SELECT id,agent_id,kind,state,snapshot_revision,created_at,lease_until FROM runs WHERE session_id=? ORDER BY created_at DESC,rowid DESC LIMIT 30',id),
       traces:this.store.all('SELECT agent_id,run_id,code,detail,created_at FROM traces WHERE session_id=? ORDER BY id DESC LIMIT 150',id),metrics:this.metrics(id)};
@@ -549,6 +654,6 @@ export class SessionService {
   exportSession(id: string): Record<string,unknown> {
     const s=this.session(id); return {manifest:{schemaVersion:1,commit:process.env.GITHUB_SHA??'local',session:this.publicSession(s),sqliteVersion:this.store.sqliteVersion,
       characterHashes:this.agents(id).map(a=>({id:a.id,character:hash(characterOf(a)),profile:hash(profileOf(a))})),exportedAt:new Date(this.now()).toISOString()},
-      transcript:this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY rowid',id).map(m=>this.publicMessage(m)),metrics:this.metrics(id)};
+      transcript:this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? ORDER BY sequence',id).map(m=>this.publicMessage(m)),metrics:this.metrics(id)};
   }
 }

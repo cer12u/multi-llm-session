@@ -23,7 +23,7 @@ try{
     if(!live){delete env.MODEL_PROVIDER;delete env.MODEL_NAME;delete env.MODEL_BASE_URL;delete env.LLM_API_KEY;env.ALLOW_LIVE_MODELS='0';}
     const cluster=await startCluster(env,true),client=new CoreClient(cluster.base,cluster.token);
     try{
-      const settings=SettingsSchema.parse(live?{}:{debounceMs:0,maxCoalesceMs:0,directedDebounceMs:0,arbitrationMs:10,postGapMs:30,agentCooldownMs:40,replyGraceMs:0,idleMs:3000,selfWakeMinMs:60000,selfWakeMaxMs:60000,maxMessages:count*2,maxCalls:3000,maxDurationMs:120000,reviewTtlMs:30000,memoryEvery:100});
+      const settings=SettingsSchema.parse(live?{maxDurationMs:900000,selfWakeMinMs:60000,selfWakeMaxMs:180000}:{debounceMs:0,maxCoalesceMs:0,directedDebounceMs:0,arbitrationMs:10,postGapMs:30,agentCooldownMs:40,replyGraceMs:0,idleMs:3000,selfWakeMinMs:60000,selfWakeMaxMs:60000,maxMessages:count*2,maxCalls:3000,maxDurationMs:120000,reviewTtlMs:30000,memoryEvery:100});
       const created=await fetch(cluster.base+'/v1/sessions',{method:'POST',headers:{authorization:'Bearer '+cluster.token,'content-type':'application/json','idempotency-key':randomUUID()},body:JSON.stringify({title:`${live?'Live':'Mock'} ${count}-agent session`,participants:slots.map((s,i)=>({slot:s.id,characterId:['sora','nagi','rin'][i%3],profileId:live?'live':'mock'})),settings})});
       if(!created.ok)throw new Error('Session creation failed: '+created.status);
       const {id}=await created.json() as {id:string};

@@ -1,35 +1,36 @@
 import Database from 'better-sqlite3';
+import { migrate } from './migrations.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { Character, ModelProfile, Settings, RunKind, Intent } from '../contracts/index.js';
+import { ModelProfileSchema, type Character, type ModelProfile, type Settings, type RunKind, type Intent } from '../contracts/index.js';
 
 export type SessionRow = { id: string; title: string; lifecycle: 'DRAFT'|'RUNNING'|'PAUSED'|'ENDED';
   activity: 'ACTIVE'|'QUIET'|'DEGRADED'|'BUDGET_PAUSED'; revision: number; epoch: number;
   created_at: number; started_at: number|null; last_activity_at: number; last_post_at: number;
-  settings_json: string; call_count: number; bot_count: number; stop_reason: string|null; episode: number };
+  settings_json: string; call_count: number; bot_count: number; stop_reason: string|null; episode: number; active_elapsed_ms: number; active_since: number|null; window_call_start: number; window_post_start: number };
 export type AgentRow = { id: string; session_id: string; slot: string; character_json: string; profile_json: string;
   enabled: number; processed_revision: number; dirty_revision: number; wake_seq: number; processed_wake: number;
   pending_since: number|null; due_at: number|null; trigger: string; idle_checked: number; next_self_at: number;
-  last_post_at: number; error_count: number; state: string; memory_revision: number; deferral_json: string|null };
+  last_post_at: number; error_count: number; state: string; memory_revision: number; deferral_json: string|null; retry_at: number|null; last_error: string|null };
 export type CandidateRow = { id: string; agent_id: string; session_id: string; version: number; state: string;
   intent_json: string; text: string|null; reviewed_revision: number; reviewed_wake: number; first_interested_at: number;
   not_before: number; review_due_at: number; defer_json: string|null; reason: string|null };
 export type RunRow = { id: string; agent_id: string; session_id: string; slot: string; worker_epoch: number;
   session_epoch: number; kind: RunKind; token: string; state: string; snapshot_revision: number; wake_seq: number;
   candidate_id: string|null; candidate_version: number|null; created_at: number; lease_until: number;
-  context_json: string; result_hash: string|null; result_json: string|null };
-export type MessageRow = { id: string; session_id: string; revision: number; author_id: string|null; text: string;
+  retrieval_count: number; context_json: string; result_hash: string|null; result_json: string|null };
+export type MessageRow = { sequence: number; thread_root: string; id: string; session_id: string; revision: number; author_id: string|null; text: string;
   act: string; reply_to: string|null; addressed_json: string; candidate_id: string|null; deleted: number;
   episode: number; created_at: number };
 export type CallRow = { id: string; run_id: string; request_key: string; scope: string; stage: string; status: string;
   started_at: number; expires_at: number; finished_at: number|null; input_tokens: number|null; output_tokens: number|null;
   error_code: string|null; result_hash: string|null };
 export const characterOf = (a: AgentRow) => JSON.parse(a.character_json) as Character;
-export const profileOf = (a: AgentRow) => JSON.parse(a.profile_json) as ModelProfile;
+export const profileOf = (a: AgentRow) => ModelProfileSchema.parse(JSON.parse(a.profile_json));
 export const settingsOf = (s: SessionRow) => JSON.parse(s.settings_json) as Settings;
 export const intentOf = (c: CandidateRow) => JSON.parse(c.intent_json) as Intent;
 
-const schema = `
+export const legacySchemaV1 = `
 CREATE TABLE characters(id TEXT NOT NULL, version INTEGER NOT NULL, definition TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(id,version));
 CREATE TABLE workers(slot TEXT PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE sessions(id TEXT PRIMARY KEY, title TEXT NOT NULL, lifecycle TEXT NOT NULL CHECK(lifecycle IN ('DRAFT','RUNNING','PAUSED','ENDED')),
@@ -96,8 +97,9 @@ export class Store {
     this.db.pragma('journal_mode = WAL'); this.db.pragma('synchronous = FULL');
     this.db.pragma('foreign_keys = ON'); this.db.pragma('busy_timeout = 5000');
     const version = this.db.pragma('user_version', { simple: true }) as number;
-    if (version === 0) this.tx(() => this.db.exec(schema));
-    else if (version !== 1) { this.db.close(); throw new Error('Unsupported database schema: ' + version); }
+    if (version === 0) this.tx(() => this.db.exec(legacySchemaV1));
+    else if (version > 2) { this.db.close(); throw new Error('Unsupported database schema: ' + version); }
+    migrate(this.db);
   }
   get<T>(sql: string, ...args: unknown[]): T|undefined { return this.db.prepare(sql).get(...args) as T|undefined; }
   all<T>(sql: string, ...args: unknown[]): T[] { return this.db.prepare(sql).all(...args) as T[]; }
