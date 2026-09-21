@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 
 /** Additive, transactional migration: never discard conversation or private-memory rows. */
-export function migrate(db: Database.Database): void {
+function migrateV2(db: Database.Database): void {
   const version = db.pragma('user_version', { simple: true }) as number;
   if (version === 2) return;
   if (version !== 1) throw new Error('Unsupported migration source: ' + version);
@@ -50,5 +50,36 @@ export function migrate(db: Database.Database): void {
       db.prepare('UPDATE sessions SET settings_json=? WHERE id=?').run(JSON.stringify(s),row.id);
     }
     db.pragma('user_version = 2');
+  }).immediate();
+}
+
+
+/** V3 adds working state without inferring it from legacy notes or deleting those notes. */
+export function migrate(db: Database.Database): void {
+  const version = db.pragma('user_version', { simple: true }) as number;
+  if (version === 3) return;
+  if (version === 1) migrateV2(db);
+  else if (version !== 2) throw new Error('Unsupported migration source: ' + version);
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE agent_private_states(
+        agent_id TEXT PRIMARY KEY REFERENCES agent_instances(id),
+        version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0),
+        entries_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL);
+      CREATE TABLE agent_state_updates(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL REFERENCES agent_instances(id),
+        run_id TEXT UNIQUE REFERENCES runs(id), kind TEXT NOT NULL,
+        from_version INTEGER NOT NULL, to_version INTEGER NOT NULL,
+        observation_json TEXT, patch_json TEXT NOT NULL,
+        before_json TEXT NOT NULL, after_json TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE INDEX state_update_owner ON agent_state_updates(agent_id,id);
+      INSERT INTO agent_private_states(agent_id,updated_at) SELECT id,0 FROM agent_instances;
+      UPDATE runs SET state='CANCELLED' WHERE state='ACTIVE';
+      UPDATE llm_calls SET status='ABANDONED' WHERE status='RESERVED';
+      UPDATE candidates SET state='NEEDS_REVIEW',reason='PRIVATE_STATE_UPGRADE'
+        WHERE state='READY';
+      PRAGMA user_version=3;
+    `);
   }).immediate();
 }

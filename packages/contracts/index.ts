@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { StatePatchSchema, type PrivateState, type ObservationManifest } from './agent-state.js';
+export * from './agent-state.js';
 
 export const Id = z.string().uuid();
 export const Slug = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/);
@@ -93,8 +95,21 @@ export type Usage = z.infer<typeof UsageSchema>;
 export const ErrorCodeSchema = z.enum(['API_ERROR', 'AUTH_ERROR', 'RATE_LIMIT', 'TIMEOUT', 'FORMAT_ERROR', 'CONTEXT_LIMIT', 'CANCELLED', 'CONFIG_ERROR']);
 export type ModelErrorCode = z.infer<typeof ErrorCodeSchema>;
 export type RunKind = 'decide' | 'draft' | 'review' | 'memory';
-export const OutputSchemas = { decide: DecisionSchema, draft: DraftSchema, review: ReviewSchema, memory: MemorySchema };
-export type RunOutput = z.infer<typeof DecisionSchema> | z.infer<typeof DraftSchema> | z.infer<typeof ReviewSchema> | z.infer<typeof MemorySchema>;
+// Legacy actions remain accepted for existing fixtures/clients. The envelope adds a
+// private state transition without adding fields to the public action contracts.
+export const StatefulOutputSchemas = {
+  decide: z.object({ action: DecisionSchema, statePatch: StatePatchSchema.nullable() }).strict(),
+  draft: z.object({ action: DraftSchema, statePatch: StatePatchSchema.nullable() }).strict(),
+  review: z.object({ action: ReviewSchema, statePatch: StatePatchSchema.nullable() }).strict(),
+  memory: z.object({ action: MemorySchema, statePatch: StatePatchSchema.nullable() }).strict(),
+};
+export const OutputSchemas = {
+  decide: z.union([DecisionSchema, StatefulOutputSchemas.decide]),
+  draft: z.union([DraftSchema, StatefulOutputSchemas.draft]),
+  review: z.union([ReviewSchema, StatefulOutputSchemas.review]),
+  memory: z.union([MemorySchema, StatefulOutputSchemas.memory]),
+};
+export type RunOutput = z.infer<typeof OutputSchemas.decide> | z.infer<typeof OutputSchemas.draft> | z.infer<typeof OutputSchemas.review> | z.infer<typeof OutputSchemas.memory>;
 export type Lifecycle = 'DRAFT' | 'RUNNING' | 'PAUSED' | 'ENDED';
 export type Activity = 'ACTIVE' | 'QUIET' | 'DEGRADED' | 'BUDGET_PAUSED';
 export type PublicMessage = {
@@ -111,7 +126,7 @@ export type Snapshot = { session: PublicSession; agents: PublicAgent[]; messages
 export type PublicEvent = { id: string; sessionId: string; kind: string; revision: number;
   createdAt: number; message?: PublicMessage; data: Record<string, unknown> };
 export type Context = {
-  self: { id: string; character: Character }; participants: PublicAgent[]; revision: number; trigger: string;
+  self: { id: string; character: Character; privateState?: PrivateState }; observation?: ObservationManifest; participants: PublicAgent[]; revision: number; trigger: string;
   messages: PublicMessage[]; delta: PublicMessage[]; historyTruncated: boolean;
   coverage?: { fromRevision: number; throughRevision: number; targetRevision: number; complete: boolean };
   retrieved?: RetrievalResult[];
@@ -142,8 +157,8 @@ export const LookupRequestSchema = z.object({
 export const LookupSchema = z.object({ decision: z.literal('LOOKUP'), requests: z.array(LookupRequestSchema).min(1).max(3) }).strict();
 export type LookupRequest = z.infer<typeof LookupRequestSchema>;
 export const WireOutputSchemas = {
-  decide: z.union([DecisionSchema, LookupSchema]), draft: z.union([DraftSchema, LookupSchema]),
-  review: z.union([ReviewSchema, LookupSchema]), memory: MemorySchema,
+  decide: z.union([OutputSchemas.decide, LookupSchema]), draft: z.union([OutputSchemas.draft, LookupSchema]),
+  review: z.union([OutputSchemas.review, LookupSchema]), memory: OutputSchemas.memory,
 };
 export type MemoryNote = { id: string; text: string; sourceMessageIds: string[] };
 export type Page<T> = { items: T[]; nextCursor: string | null; highWater: number };
