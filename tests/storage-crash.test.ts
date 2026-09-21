@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fixture } from './helpers.js';
@@ -26,12 +26,13 @@ async function crash(path:string,phase:string,requestPath:string,body:unknown,he
       if(value.ready&&value.base?.startsWith('http://127.0.0.1:'))resolveReady(value.base);else reject(new Error('Invalid fixture readiness'));
     });
   });
-  let response:Response|undefined;
-  const timeout=setTimeout(()=>child.kill('SIGKILL'),8000);
+  let response:Response|undefined,timedOut=false;
+  const timeout=setTimeout(()=>{timedOut=true;child.kill('SIGKILL');},8000);
   try{
     try{response=await fetch(base+requestPath,{method:'POST',headers:{...headers,'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(6000)});}catch{}
     const result=await exit;
-    expect(result.signal).toBe('SIGKILL');expect(response,stderr).toBeUndefined();
+    expect(timedOut,stderr).toBe(false);expect(result.signal).toBe('SIGKILL');expect(response,stderr).toBeUndefined();
+    expect(readFileSync(path+'.crash-'+phase,'utf8')).toBe(phase);
   }finally{clearTimeout(timeout);await response?.body?.cancel();}
 }
 function record(phase:string,kind:string,rows:number){evidence.push({phase,kind,signal:'SIGKILL',rows});mkdirSync('artifacts',{recursive:true});writeFileSync('artifacts/storage-crash-summary.json',JSON.stringify({mode:'synthetic-real-subprocess',cases:evidence},null,2));}
