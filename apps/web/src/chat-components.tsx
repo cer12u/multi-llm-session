@@ -34,9 +34,9 @@ export function Composer({ draft, change, send, pending, agents, thread = false,
       placeholder={thread ? 'この発言への返信を書く' : `# ${title} にメッセージを送信`} disabled={pending} readOnly={readOnly} aria-describedby={hint}
       onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
       onKeyDown={event => { if (shouldSendOnEnter({ key: event.key, shiftKey: event.shiftKey, isComposing: event.nativeEvent.isComposing, keyCode: event.keyCode }, composing.current)) { event.preventDefault(); if (!pending && !readOnly && !sendBlocked && draft.text.trim()) send(); } }} />
-    <div className="composer-tools"><label className="address-label"><span>@</span><span className="sr-only">{thread ? '返信の宛先' : '宛先'}</span><select value={draft.addressedTo} disabled={pending || readOnly} onChange={event => change({ ...draft, addressedTo: event.target.value })}>
+    <div className="composer-tools"><label className="address-label" htmlFor={hint + '-address'}><span aria-hidden="true">@</span><span className="sr-only">{thread ? '返信の宛先' : '宛先'}</span></label><select id={hint + '-address'} aria-label={thread ? '返信の宛先' : '宛先'} value={draft.addressedTo} disabled={pending || readOnly} onChange={event => change({ ...draft, addressedTo: event.target.value })}>
       <option value="">全員</option>{agents.filter(agent => agent.enabled).map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
-    </select></label><button type="submit" className="send-button" disabled={pending || readOnly || sendBlocked || !draft.text.trim()} aria-label={thread ? '返信を送信' : '送信'}><Icon name="send" /><span>{pending ? '送信中' : '送信'}</span></button></div>
+    </select><button type="submit" className="send-button" disabled={pending || readOnly || sendBlocked || !draft.text.trim()} aria-label={thread ? '返信を送信' : '送信'}><Icon name="send" /><span>{pending ? '送信中' : '送信'}</span></button></div>
     <div className="composer-hint" id={hint}>Enter で送信・Shift + Enter で改行<span>{persistenceHint}</span></div>
   </form>;
 }
