@@ -55,7 +55,7 @@ function migrateV2(db: Database.Database): void {
 
 
 /** V3 adds working state without inferring it from legacy notes or deleting those notes. */
-export function migrate(db: Database.Database): void {
+function migrateV3(db: Database.Database): void {
   const version = db.pragma('user_version', { simple: true }) as number;
   if (version === 3) return;
   if (version === 1) migrateV2(db);
@@ -80,6 +80,53 @@ export function migrate(db: Database.Database): void {
       UPDATE candidates SET state='NEEDS_REVIEW',reason='PRIVATE_STATE_UPGRADE'
         WHERE state='READY';
       PRAGMA user_version=3;
+    `);
+  }).immediate();
+}
+
+
+/** V4 uses an ordered notification log; old cursors are NOT assumed to prove past coverage. */
+export function migrate(db: Database.Database): void {
+  const version = db.pragma('user_version', { simple: true }) as number;
+  if (version === 4) return;
+  if (version < 3) migrateV3(db);
+  else if (version !== 3) throw new Error('Unsupported migration source: ' + version);
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE agent_input_log(id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL REFERENCES sessions(id), kind TEXT NOT NULL,
+        entity_id TEXT NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL);
+      CREATE INDEX input_session_order ON agent_input_log(session_id,id);
+      INSERT INTO agent_input_log(session_id,kind,entity_id,version,created_at)
+        SELECT session_id,'message',id,revision,created_at FROM messages ORDER BY session_id,sequence;
+      INSERT INTO agent_input_log(session_id,kind,entity_id,version,created_at)
+        SELECT session_id,'source',id,fetched_at,fetched_at FROM source_items ORDER BY fetched_at,rowid;
+      CREATE TRIGGER input_message_insert AFTER INSERT ON messages BEGIN
+        INSERT INTO agent_input_log(session_id,kind,entity_id,version,created_at)
+          VALUES(NEW.session_id,'message',NEW.id,NEW.revision,NEW.created_at); END;
+      CREATE TRIGGER input_message_update AFTER UPDATE OF text,deleted,revision ON messages BEGIN
+        INSERT INTO agent_input_log(session_id,kind,entity_id,version,created_at)
+          VALUES(NEW.session_id,'message',NEW.id,NEW.revision,
+            MAX(NEW.created_at,COALESCE((SELECT MAX(created_at) FROM agent_input_log WHERE session_id=NEW.session_id),NEW.created_at))); END;
+      CREATE TRIGGER input_source_insert AFTER INSERT ON source_items BEGIN
+        INSERT INTO agent_input_log(session_id,kind,entity_id,version,created_at)
+          VALUES(NEW.session_id,'source',NEW.id,NEW.fetched_at,NEW.fetched_at); END;
+      CREATE TABLE agent_input_cursors(agent_id TEXT PRIMARY KEY REFERENCES agent_instances(id),
+        observed_input INTEGER NOT NULL DEFAULT 0, memory_input INTEGER NOT NULL DEFAULT 0,
+        memory_target INTEGER NOT NULL DEFAULT 0, foreground_runs INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE agent_input_receipts(run_id TEXT PRIMARY KEY REFERENCES runs(id),
+        agent_id TEXT NOT NULL REFERENCES agent_instances(id), purpose TEXT NOT NULL,
+        from_input INTEGER NOT NULL, through_input INTEGER NOT NULL, target_input INTEGER NOT NULL,
+        window_json TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE INDEX input_receipt_owner ON agent_input_receipts(agent_id,purpose,through_input);
+      CREATE TABLE candidate_state_bindings(candidate_id TEXT PRIMARY KEY REFERENCES candidates(id),state_version INTEGER NOT NULL);
+      CREATE TABLE memory_input_origins(memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL REFERENCES runs(id),evidence_json TEXT NOT NULL);
+      INSERT INTO agent_input_cursors(agent_id) SELECT id FROM agent_instances;
+      UPDATE runs SET state='CANCELLED' WHERE state='ACTIVE';
+      UPDATE llm_calls SET status='ABANDONED' WHERE status='RESERVED';
+      UPDATE candidates SET state='NEEDS_REVIEW',reason='INPUT_CURSOR_UPGRADE' WHERE state='READY';
+      PRAGMA user_version=4;
     `);
   }).immediate();
 }
