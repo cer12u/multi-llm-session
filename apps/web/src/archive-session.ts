@@ -19,6 +19,8 @@ export class ArchiveSession {
   private olderPromise:Promise<void>|null=null;
   private repairPromise:Promise<void>|null=null;
   private repairAgain=false;
+  private repairPending=false;
+  private recoveryHigh:number|null=null;
   historyCursor:string|null=null;
   historyBusy=false;
   historyError='';
@@ -58,8 +60,9 @@ export class ArchiveSession {
   }
   async synchronize(snapshot:Snapshot):Promise<void>{
     if(!this.alive||snapshot.session.id!==this.sessionId||snapshot.session.revision<this.revision)return;
-    const previousHigh=this.messages.at(-1)?.sequence??0;
-    const repair=this.initialized&&snapshot.session.revision>Math.max(this.observedRevision,this.revision);
+    const previousHigh=this.recoveryHigh??this.messages.at(-1)?.sequence??0;
+    const repair=this.initialized&&(this.repairPending||snapshot.session.revision>Math.max(this.observedRevision,this.revision));
+    if(repair)this.repairPending=true;
     if(!this.initialized){this.historyCursor=snapshot.historyCursor;this.initialized=true;}
     this.revision=snapshot.session.revision;this.merge(snapshot.messages,true);
     if(this.threadRoot)for(const m of snapshot.messages)if(m.threadRootId===this.threadRoot)this.threadIds.add(m.id);
@@ -67,26 +70,38 @@ export class ArchiveSession {
     try{
       let cursor=snapshot.historyCursor;
       if(previousHigh&&snapshot.messages.length&&(snapshot.messages[0].sequence>previousHigh+1)){
-        while(cursor&&this.alive){
-          const page=await this.read<Page<PublicMessage>>(this.url('history?limit=100&cursor='+encodeURIComponent(cursor)));
-          if(!this.alive)return;this.merge(page.items,true);this.notify();
-          if(!page.items.length||page.items[0].sequence<=previousHigh+1)break;
-          if(page.nextCursor===cursor)throw new Error('PAGE_CURSOR_STALLED');cursor=page.nextCursor;
-        }
+        // Receiving the newest page does not acknowledge the missing interval. Retain
+        // its earlier high-water mark until every bridging page has been recovered.
+        this.recoveryHigh=previousHigh;this.notificationBatch++;
+        try{
+          while(cursor&&this.alive){
+            const page=await this.read<Page<PublicMessage>>(this.url('history?limit=100&cursor='+encodeURIComponent(cursor)));
+            if(!this.alive)return;this.merge(page.items,true);
+            if(!page.items.length||page.items[0].sequence<=previousHigh+1)break;
+            if(page.nextCursor===cursor)throw new Error('PAGE_CURSOR_STALLED');cursor=page.nextCursor;
+          }
+          this.recoveryHigh=null;
+        }finally{this.notificationBatch--;this.notify();}
       }
       if(repair)await this.revalidateKnown();
     }catch(error){if(this.alive){this.historyError=error instanceof Error?error.message:'履歴を再同期できませんでした。';this.notify();}}
   }
   private revalidateKnown():Promise<void>{
-    this.repairAgain=true;if(this.repairPromise)return this.repairPromise;
+    this.repairPending=true;this.repairAgain=true;if(this.repairPromise)return this.repairPromise;
     this.repairPromise=(async()=>{
-      while(this.repairAgain&&this.alive){
-        this.repairAgain=false;const ids=[...this.records.keys()];
-        for(let i=0;i<ids.length&&this.alive;i+=200){
-          const messages=await this.read<PublicMessage[]>(this.url('messages/lookup'),{ids:ids.slice(i,i+200)});
-          if(!this.alive)return;this.merge(messages);this.notify();
+      this.notificationBatch++;
+      try{
+        while(this.repairAgain&&this.alive){
+          this.repairAgain=false;const ids=[...this.records.keys()];
+          for(let i=0;i<ids.length&&this.alive;i+=200){
+            const messages=await this.read<PublicMessage[]>(this.url('messages/lookup'),{ids:ids.slice(i,i+200)});
+            if(!this.alive)return;this.merge(messages);
+          }
         }
-      }
+        // Snapshot revision alone does not prove old records were reconciled. Keep
+        // this flag on failure so a later snapshot of the SAME revision retries.
+        this.repairPending=false;this.historyError='';
+      }finally{this.notificationBatch--;this.notify();}
     })().finally(()=>{this.repairPromise=null;});return this.repairPromise;
   }
   async resynchronize():Promise<void>{
