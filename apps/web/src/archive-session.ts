@@ -20,6 +20,7 @@ export class ArchiveSession {
   private repairPromise:Promise<void>|null=null;
   private repairAgain=false;
   private repairPending=false;
+  private recoveryHigh:number|null=null;
   historyCursor:string|null=null;
   historyBusy=false;
   historyError='';
@@ -59,7 +60,7 @@ export class ArchiveSession {
   }
   async synchronize(snapshot:Snapshot):Promise<void>{
     if(!this.alive||snapshot.session.id!==this.sessionId||snapshot.session.revision<this.revision)return;
-    const previousHigh=this.messages.at(-1)?.sequence??0;
+    const previousHigh=this.recoveryHigh??this.messages.at(-1)?.sequence??0;
     const repair=this.initialized&&(this.repairPending||snapshot.session.revision>Math.max(this.observedRevision,this.revision));
     if(repair)this.repairPending=true;
     if(!this.initialized){this.historyCursor=snapshot.historyCursor;this.initialized=true;}
@@ -69,12 +70,18 @@ export class ArchiveSession {
     try{
       let cursor=snapshot.historyCursor;
       if(previousHigh&&snapshot.messages.length&&(snapshot.messages[0].sequence>previousHigh+1)){
-        while(cursor&&this.alive){
-          const page=await this.read<Page<PublicMessage>>(this.url('history?limit=100&cursor='+encodeURIComponent(cursor)));
-          if(!this.alive)return;this.merge(page.items,true);this.notify();
-          if(!page.items.length||page.items[0].sequence<=previousHigh+1)break;
-          if(page.nextCursor===cursor)throw new Error('PAGE_CURSOR_STALLED');cursor=page.nextCursor;
-        }
+        // Receiving the newest page does not acknowledge the missing interval. Retain
+        // its earlier high-water mark until every bridging page has been recovered.
+        this.recoveryHigh=previousHigh;this.notificationBatch++;
+        try{
+          while(cursor&&this.alive){
+            const page=await this.read<Page<PublicMessage>>(this.url('history?limit=100&cursor='+encodeURIComponent(cursor)));
+            if(!this.alive)return;this.merge(page.items,true);
+            if(!page.items.length||page.items[0].sequence<=previousHigh+1)break;
+            if(page.nextCursor===cursor)throw new Error('PAGE_CURSOR_STALLED');cursor=page.nextCursor;
+          }
+          this.recoveryHigh=null;
+        }finally{this.notificationBatch--;this.notify();}
       }
       if(repair)await this.revalidateKnown();
     }catch(error){if(this.alive){this.historyError=error instanceof Error?error.message:'履歴を再同期できませんでした。';this.notify();}}
