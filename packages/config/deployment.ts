@@ -60,13 +60,17 @@ export function generateDeployment(input:unknown, output:string, repository=proc
     ensure(data.characters.some(c=>c.id===worker.characterId),422,'UNKNOWN_CHARACTER');
     ensure(data.profiles.some(p=>p.id===worker.profileId),422,'UNKNOWN_MODEL_PROFILE');
   }
-  // Read/validate sources before creating anything. Error messages never include their contents.
+  // Both source and destination stay outside the build context, including symlink aliases.
   const values=new Map<string,string>();
   for(const name of used){
+    let path:string;
+    try{path=realpathSync(resolve(data.credentialFiles[name]));}catch{throw new Error('DEPLOY_CREDENTIAL_UNREADABLE');}
+    const sourceRelative=relative(root,path);
+    ensure(sourceRelative==='..'||sourceRelative.startsWith('../'),422,'DEPLOY_CREDENTIAL_MUST_BE_OUTSIDE_REPOSITORY');
     let value:string;
-    try {const path=resolve(data.credentialFiles[name]);ensure(statSync(path).size<16384,422,'INVALID_MODEL_CREDENTIAL');value=readFileSync(path,'utf8').trim();}
+    try {const info=statSync(path);ensure(info.isFile()&&info.size<16384,422,'INVALID_MODEL_CREDENTIAL');value=readFileSync(path,'utf8').trim();}
     catch {throw new Error('DEPLOY_CREDENTIAL_UNREADABLE');}
-    ensure(value.length>0&&value.length<16384,422,'INVALID_MODEL_CREDENTIAL');values.set(name,value);
+    ensure(value.length>0&&value.length<16384&&!/[\r\n\u0000]/.test(value),422,'INVALID_MODEL_CREDENTIAL');values.set(name,value);
   }
   mkdirSync(target,{mode:0o700});
   try {
