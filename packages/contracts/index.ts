@@ -5,8 +5,8 @@ import type { InputWindow, InputProgress, InputSelection } from './input-window.
 export * from './input-window.js';
 import type { AgendaContext } from './agenda.js';
 export * from './agenda.js';
-import { ProviderCapabilitiesSchema } from './provider-capabilities.js';
-export * from './provider-capabilities.js';
+import { MemoryChangeSchema, type MemoryProvenance } from './memory.js';
+export * from './memory.js';
 
 export const Id = z.string().uuid();
 export const Slug = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/);
@@ -27,10 +27,8 @@ export const ModelProfileSchema = z.object({
   failureThreshold: z.number().int().min(1).max(10).default(3),
   circuitCooldownMs: z.number().int().min(1000).max(3600000).default(60000),
   allowLocalHttp: z.boolean().default(false), authRequired: z.boolean().default(true),
-  // No default: parsing a legacy immutable profile must not silently change its stored hash.
-  capabilities: ProviderCapabilitiesSchema.optional(),
-}).strict().refine(p=>!p.capabilities||p.capabilities.jsonModes.includes(p.jsonMode),'Selected JSON mode is not declared supported')
-  .refine(p=>!p.capabilities||p.provider==='mock'||(p.provider==='ollama')===(p.capabilities.outputTokenParameter==='num_predict'),'Token parameter does not match Provider API');
+  contextWindowTokens: z.number().int().min(2048).max(2097152).optional(),
+}).strict();
 export type ModelProfile = z.infer<typeof ModelProfileSchema>;
 
 export const SettingsSchema = z.object({
@@ -53,6 +51,7 @@ export const SettingsSchema = z.object({
   maxDurationMs: z.number().int().min(1000).max(21600000).default(3600000),
   contextMessages: z.number().int().min(5).max(100).default(40),
   contextChars: z.number().int().min(4000).max(100000).default(24000),
+  contextTokens: z.number().int().min(2048).max(2097152).default(65536),
   agendaMinIntervalMs: z.number().int().min(100).max(86400000).default(30000),
   memoryShareEvery: z.number().int().min(1).max(32).default(3),
   memoryFlushMs: z.number().int().min(100).max(86400000).default(60000),
@@ -99,12 +98,13 @@ export const ReviewSchema = z.discriminatedUnion('decision', [
 ]);
 export const MemorySchema = z.object({ notes: z.array(z.object({
   text: z.string().trim().min(1).max(1000), sourceMessageIds: z.array(Id).min(1).max(8),
-}).strict()).max(4) }).strict();
+}).strict()).max(4), changes:z.array(MemoryChangeSchema).max(4).optional() }).strict()
+  .refine(x=>x.notes.length+(x.changes?.length??0)<=4,'At most four memory changes per result');
 export const UsageSchema = z.object({
   inputTokens: z.number().int().nonnegative().nullable(), outputTokens: z.number().int().nonnegative().nullable(),
 }).strict();
 export type Usage = z.infer<typeof UsageSchema>;
-export const ErrorCodeSchema = z.enum(['API_ERROR', 'AUTH_ERROR', 'RATE_LIMIT', 'TIMEOUT', 'FORMAT_ERROR', 'CONTEXT_LIMIT', 'CANCELLED', 'CONFIG_ERROR', 'OUTPUT_TRUNCATED', 'EMPTY_RESPONSE', 'OUTPUT_TOO_LARGE', 'RESPONSE_REFUSED', 'DELIVERY_UNKNOWN']);
+export const ErrorCodeSchema = z.enum(['API_ERROR', 'AUTH_ERROR', 'RATE_LIMIT', 'TIMEOUT', 'FORMAT_ERROR', 'CONTEXT_LIMIT', 'CANCELLED', 'CONFIG_ERROR']);
 export type ModelErrorCode = z.infer<typeof ErrorCodeSchema>;
 export type RunKind = 'decide' | 'draft' | 'review' | 'memory' | 'observe';
 export const ObserveSchema = z.object({ decision: z.literal('ABSTAIN'), reason: z.string().max(160) }).strict();
@@ -131,7 +131,7 @@ export type PublicMessage = {
   replyTo: string | null; addressedTo: string[]; deleted: boolean; episode: number; createdAt: number;
 };
 export type PublicAgent = { id: string; slot: string; characterId: string; characterVersion: number; name: string;
-  presentationRef: string | null; profileId: string; enabled: boolean; status: string; workerOnline: boolean; lastSeenAt: number | null; nextRetryAt: number | null }; 
+  presentationRef: string | null; profileId: string; enabled: boolean; status: string; workerOnline: boolean; lastSeenAt: number | null; nextRetryAt: number | null };
 export type PublicSession = { id: string; title: string; lifecycle: Lifecycle; activity: Activity; revision: number;
   epoch: number; createdAt: number; startedAt: number | null; stopReason: string | null;
   calls: number; botMessages: number; budget: { callsUsed: number; messagesUsed: number; activeMs: number }; settings: Settings; mode: 'mock' | 'live' };
@@ -143,10 +143,11 @@ export type Context = {
   messages: PublicMessage[]; delta: PublicMessage[]; historyTruncated: boolean;
   agenda?: AgendaContext;
   delivery?: InputWindow; progress?: InputProgress; selection?: InputSelection;
-  recall?: { algorithm: 'local-word-evidence-v1'; selected: {id:string;score:number;provenance:string}[]; omittedForBudget: string[] };
+  recall?: { algorithm: 'local-word-evidence-v1' | 'owner-meaning-v2'; selected: {id:string;score:number;provenance:string}[]; omittedForBudget: string[]; elapsedMs?:number; candidates?:number; additionalCalls?:number };
+  inputBudget?: {method:'utf8-upper-bound';maxTokens:number;reservedOutputTokens:number;estimatedInputTokens:number;tokenizer:'unknown'};
   coverage?: { fromRevision: number; throughRevision: number; targetRevision: number; complete: boolean };
   retrieved?: RetrievalResult[];
-  memories: { id: string; text: string; sourceMessageIds: string[] }[];
+  memories: MemoryNote[];
   questions: { messageId: string; text: string; from: string | null }[];
   sources: { id: string; title: string; text: string; url: string | null; publishedAt: string | null; fetchedAt: number }[];
   candidate: { id: string; version: number; intent: Intent; text: string | null; reviewedRevision: number } | null;
@@ -176,6 +177,6 @@ export const WireOutputSchemas = {
   decide: z.union([OutputSchemas.decide, LookupSchema]), draft: z.union([OutputSchemas.draft, LookupSchema]),
   review: z.union([OutputSchemas.review, LookupSchema]), memory: OutputSchemas.memory,
 };
-export type MemoryNote = { id: string; text: string; sourceMessageIds: string[] };
+export type MemoryNote = { id: string; text: string; sourceMessageIds: string[]; provenance?:MemoryProvenance };
 export type Page<T> = { items: T[]; nextCursor: string | null; highWater: number };
 export type RetrievalResult = { request: LookupRequest; messages: PublicMessage[]; memories: MemoryNote[]; nextCursor: string | null };
