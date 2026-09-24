@@ -50,10 +50,12 @@ export class AgentAgenda {
     if (plan.matched_input === null) return true;
     const input = this.store.get<Notification>('SELECT id,kind,entity_id,version FROM agent_input_log WHERE id=?', plan.matched_input);
     if (!input || input.version !== plan.matched_version) return false;
-    const live = input.kind === 'message'
-      ? this.store.get<{version:number;deleted:number}>('SELECT revision version,deleted FROM messages WHERE id=?', input.entity_id)
-      : this.store.get<SourceRow & {deleted:number}>('SELECT *,1-enabled deleted FROM source_items WHERE id=?', input.entity_id);
-    return !!live && !live.deleted && live.version === plan.matched_version && (input.kind==='message'||sourceAllowed(live as SourceRow,plan.agent_id));
+    if(input.kind==='message') {
+      const live=this.store.get<{version:number;deleted:number}>('SELECT revision version,deleted FROM messages WHERE id=?',input.entity_id);
+      return !!live&&!live.deleted&&live.version===plan.matched_version;
+    }
+    const source=this.store.get<SourceRow>('SELECT * FROM source_items WHERE id=?',input.entity_id);
+    return !!source&&source.version===plan.matched_version&&sourceAllowed(source,plan.agent_id);
   }
 
   reusable(run: RunRow): boolean {
