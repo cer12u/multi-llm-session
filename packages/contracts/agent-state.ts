@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ParticipationAssessmentSchema } from './participation.js';
 import { QuestionAssessmentSchema } from './conversation.js';
 
 const EntityId = z.string().uuid();
@@ -26,6 +27,7 @@ export const PrivateStateEntrySchema = z.object({
   evidence: z.array(EvidenceRefSchema).max(8),
   derivedFrom: z.array(EntityId).max(8).optional(),
   question: QuestionAssessmentSchema.optional(),
+  participation: ParticipationAssessmentSchema.optional(),
   resume: ResumeConditionSchema.nullable(),
 }).strict();
 export type PrivateStateEntry = z.infer<typeof PrivateStateEntrySchema>;
