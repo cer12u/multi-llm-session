@@ -68,7 +68,8 @@ export class WorkerRuntime {
       const stale=e instanceof CoreError&&['STALE_RUN','STALE_WORKER','BUDGET_STOPPED'].includes(e.code);
       const invalidResult=e instanceof CoreError&&(e.status===422||(e.status===409&&!stale));
       const code:ModelErrorCode=e instanceof ModelError?e.code:invalidResult?'FORMAT_ERROR':combined.aborted?'CANCELLED':'API_ERROR';
-      if(callId) await this.client.request(base+'/calls/'+callId,{token:run.token,usage:{inputTokens:null,outputTokens:null} satisfies Usage,error:code,retryAfterMs:e instanceof ModelError?e.retryAfterMs:0}).catch(()=>{});
+      const usage:Usage=e instanceof ModelError&&e.usage?e.usage:{inputTokens:null,outputTokens:null};
+      if(callId) await this.client.request(base+'/calls/'+callId,{token:run.token,usage,error:code,retryAfterMs:e instanceof ModelError?e.retryAfterMs:0}).catch(()=>{});
       // Stale generations are already fenced. Other rejected results must not leave a reusable active run.
       if(!stale) await this.client.request(base+'/failure',{...auth,code}).catch(()=>{});
       return true;

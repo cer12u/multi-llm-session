@@ -1,0 +1,20 @@
+[
+  {
+    "id": "ollama-reference", "version": 1, "provider": "ollama", "model": "REPLACE_WITH_EXACT_MODEL_ID",
+    "baseUrl": "https://provider.example.invalid/api", "apiKeyEnv": "OLLAMA_API_KEY", "authRequired": true,
+    "jsonMode": "json", "maxOutputTokens": 1024, "maxConcurrent": 2,
+    "capabilities": { "jsonModes": ["none", "json"], "outputTokenParameter": "num_predict", "temperatureSupported": true, "usage": "unknown" }
+  },
+  {
+    "id": "openai-compatible-reference", "version": 1, "provider": "openai", "model": "REPLACE_WITH_EXACT_MODEL_ID",
+    "baseUrl": "https://provider.example.invalid/v1", "apiKeyEnv": "COMPATIBLE_API_KEY", "authRequired": true,
+    "jsonMode": "schema", "maxOutputTokens": 1024, "maxConcurrent": 2,
+    "capabilities": { "jsonModes": ["none", "json", "schema"], "outputTokenParameter": "max_completion_tokens", "temperatureSupported": false, "usage": "unknown" }
+  },
+  {
+    "id": "shared-key-second-model", "version": 1, "provider": "openai", "model": "REPLACE_WITH_ANOTHER_MODEL_ID",
+    "baseUrl": "https://provider.example.invalid/v1", "apiKeyEnv": "COMPATIBLE_API_KEY", "authRequired": true,
+    "jsonMode": "json", "maxOutputTokens": 1024, "maxConcurrent": 2,
+    "capabilities": { "jsonModes": ["none", "json"], "outputTokenParameter": "max_tokens", "temperatureSupported": true, "usage": "unknown" }
+  }
+]

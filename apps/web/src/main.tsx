@@ -9,12 +9,14 @@ import './archive.css';
 import { PersistentComposer, useDurableDrafts } from './persistent-composer.js';
 import './drafts.css';
 import { CharacterManager } from './character-manager.js';
+import { ProviderManager } from './provider-manager.js';
+import { OperationsPanel } from './operations-panel.js';
 import './style.css';
 
 type Auth = { role: 'operator' | 'viewer'; csrf: string };
 type Capabilities = { profiles: { id: string; provider: string; model: string }[]; slots: string[]; defaults: Settings; liveEnabled: boolean };
 type Panel = 'thread' | 'members' | 'search' | 'settings' | 'diagnostics' | 'source' | null;
-type Modal = 'create' | 'characters' | 'end' | 'delete' | null;
+type Modal = 'create' | 'characters' | 'providers' | 'end' | 'delete' | null;
 const panelTitles: Record<Exclude<Panel, null>, string> = { thread: 'スレッド', members: '参加者', search: '会話を検索', settings: 'セッション設定', diagnostics: '管理者向け診断', source: '資料を共有' };
 const errorMessages: Record<string, string> = { AUTH_REQUIRED: 'ログインし直してください。', INVALID_LOGIN: 'トークンを確認してください。', READ_ONLY: '閲覧者は投稿できません。', SESSION_NOT_RUNNING: 'セッションの状態を確認してください。', LIVE_DISABLED: '実モデルはまだ有効になっていません。', VALIDATION_ERROR: '入力の形式や上限を確認してください。', IDEMPOTENCY_CONFLICT: '再送する内容が元の操作と一致しません。' };
 
@@ -108,6 +110,11 @@ function App() {
     const definitions = await api<Character[]>('/v1/characters');
     if (epoch === authEpoch.current) setCharacters(definitions);
   }
+  async function refreshProfiles() {
+    const epoch = authEpoch.current;
+    const capabilities = await api<Capabilities>('/v1/capabilities');
+    if (epoch === authEpoch.current) setCaps(capabilities);
+  }
   async function initialize() {
     const epoch = authEpoch.current;
     const [cs, cp, ss] = await Promise.all([api<Character[]>('/v1/characters'), api<Capabilities>('/v1/capabilities'), api<PublicSession[]>('/v1/sessions')]);
@@ -127,7 +134,7 @@ function App() {
   useEffect(() => {
     if (!auth) return;
     let closed = false; const epoch = authEpoch.current;
-    const timer = setInterval(() => { void api<PublicSession[]>('/v1/sessions').then(list => { if (!closed && epoch === authEpoch.current) setSessions(list); }).catch(() => {}); }, 5000);
+    const timer = setInterval(() => { void api<PublicSession[]>('/v1/sessions').then(list => { if (!closed && epoch ===authEpoch.current) setSessions(list); }).catch(() => {}); }, 5000);
     return () => { closed = true; clearInterval(timer); };
   }, [auth?.role]);
   useEffect(() => {
@@ -185,7 +192,7 @@ function App() {
           <span className="hash">#</span><span className="channel-copy"><strong>{item.title}</strong><small><span className={`state-dot ${item.lifecycle.toLowerCase()}`} />{lifecycleLabels[item.lifecycle]} · {item.mode === 'mock' ? '模擬' : '実モデル'}{vault?.draft(item.id).text ? ' · 下書き' : ''}</small></span><span className="post-count" title="Agentの累計発言数">{item.botMessages}</span>
         </button>)}</nav>{!sessions.length && <p className="sidebar-empty">まだセッションがありません。</p>}
         {operator && <button className="new-channel" onClick={() => { setModal('create'); setSidebarOpen(false); }} disabled={!caps}><Icon name="plus" />セッションを追加</button>}
-        <div className="sidebar-footer">{operator && <button onClick={() => { setModal('characters'); setSidebarOpen(false); }}><Icon name="users" />キャラクターを管理</button>}<button onClick={() => run(logout)}>ログアウト</button><small>ログアウトでこの端末の下書き・再送状態を削除します。</small></div>
+        <div className="sidebar-footer">{operator && <><button onClick={() => { setModal('characters'); setSidebarOpen(false); }}><Icon name="users" />キャラクターを管理</button><button onClick={() => { setModal('providers'); setSidebarOpen(false); }}><Icon name="settings" />モデルを管理</button></>}<button onClick={() => run(logout)}>ログアウト</button><small>ログアウトでこの端末の下書き・再送状態を削除します。</small></div>
       </aside>
       <div className={`session-workspace${panel ? ' with-panel' : ''}`}><main className="chat-main">{snapshot && session ? <>
         <header className="channel-header"><div className="channel-title"><h1><span>#</span> {session.title}</h1><p><span className={`state-dot ${session.lifecycle.toLowerCase()}`} />{lifecycleLabels[session.lifecycle]}<span className="connection"> · {connection}</span></p></div><div className="channel-header-actions"><button className="member-button" aria-label="参加者" title="参加者" onClick={() => openPanel('members')}><span className="avatar-stack">{snapshot.agents.slice(0, 3).map(agent => <Avatar key={agent.id} id={agent.characterId} name={agent.name} small />)}</span><span>{snapshot.agents.length}</span></button>{operator && <>{session.lifecycle === 'DRAFT' && <button className="primary compact-button" onClick={() => run(() => control('start'))}>開始</button>}{session.lifecycle === 'RUNNING' && <button className="compact-button" onClick={() => run(() => control('pause'))}>一時停止</button>}{session.lifecycle === 'PAUSED' && <button className="primary compact-button" onClick={() => run(() => control('resume'))}>再開</button>}</>}<button className="icon-button" aria-label="セッション設定" onClick={() => openPanel('settings')}><Icon name="settings" /></button></div></header>
@@ -205,7 +212,7 @@ function App() {
             {archive?.searchCursor && <button disabled={searchBusy} onClick={() => void archive.search(archive.searchQuery, true)}>検索の続きを読み込む</button>}{results && !archive?.searchCursor && !searchBusy && <p>検索結果の末尾です。</p>}
           </>}
           {panel === 'settings' && <><div className="session-facts"><span>実行状態</span><strong>{lifecycleLabels[session.lifecycle]}</strong><span>推論呼び出し</span><strong>{session.calls} / {session.settings.maxCalls}</strong><span>Agentの発言</span><strong>{session.botMessages} / {session.settings.maxMessages}</strong><span>履歴 revision</span><strong>{session.revision}</strong></div>{operator && <><div className="panel-actions"><button onClick={() => openPanel('source')}>資料を共有</button><button onClick={() => run(exportSession)}>会話を出力</button><button onClick={() => openPanel('diagnostics')}>診断</button></div><details><summary>実行上限・待機時間の詳細設定</summary><p className="muted">開始前または一時停止中だけ変更できます。</p><label className="sr-only" htmlFor="execution-settings">実行設定JSON</label><textarea id="execution-settings" className="settings-editor" value={settingsText} onChange={event => setSettingsText(event.target.value)} /><button disabled={!['DRAFT', 'PAUSED'].includes(session.lifecycle)} onClick={() => run(async () => { await api(`/v1/sessions/${session.id}/settings`, JSON.parse(settingsText)); await refresh(session.id); })}>設定を保存</button></details>{session.lifecycle !== 'ENDED' && <button className="danger-button end-session" onClick={() => setModal('end')}>セッションを終了</button>}</>}<p className="muted">模擬モデルのテスト結果は、実LLM同士の任意会話が成立したことを証明しません。</p></>}
-          {panel === 'diagnostics' && operator && <><p className="muted">管理者限定の内部状態です。通常の会話表示や他のAgentには未投稿候補を配信しません。</p><pre>{JSON.stringify(diagnostic, null, 2)}</pre></>}
+          {panel === 'diagnostics' && operator && <><OperationsPanel key={session.id} sessionId={session.id} api={api} refresh={() => refresh(session.id)} /><details><summary>内部実行記録（管理者限定）</summary><p className="muted">通常の会話表示や他のAgentには未投稿候補を配信しません。</p><pre>{JSON.stringify(diagnostic, null, 2)}</pre></details></>}
           {panel === 'source' && operator && <form onSubmit={event => { event.preventDefault(); const id = session.id; run(async () => { await api(`/v1/sessions/${id}/sources`, { title: sourceTitle, text: sourceText }); if (selectedRef.current === id) { setSourceTitle(''); setSourceText(''); setPanel(null); } }); }}><p className="muted">資料は会話の参考情報として渡します。投入しても発言は強制されません。</p><label>資料名<input value={sourceTitle} onChange={event => setSourceTitle(event.target.value)} required maxLength={300} /></label><label>本文<textarea className="source-editor" value={sourceText} onChange={event => setSourceText(event.target.value)} required maxLength={20000} /></label><button className="primary" disabled={session.lifecycle === 'ENDED'}>資料を追加</button></form>}
         </div>}
       </aside>}
@@ -213,6 +220,7 @@ function App() {
     </div>
     {modal === 'create' && <Dialog error={error} title="新しいセッション" close={() => setModal(null)}>{createForm}</Dialog>}
     {modal === 'characters' && operator && <Dialog error={error} title="キャラクターを管理" close={() => setModal(null)}><CharacterManager characters={characters} participants={snapshot?.agents ?? []} api={api} refresh={refreshCharacters} /></Dialog>}
+    {modal === 'providers' && operator && <Dialog title="モデルを管理" close={() => setModal(null)}><ProviderManager api={api} refresh={refreshProfiles} /></Dialog>}
     {modal === 'end' && session && <Dialog error={error} title="セッションを終了しますか？" close={() => setModal(null)}><p>「{session.title}」のAgentを停止し、会話を読み取り専用にします。再開したい場合は終了ではなく一時停止を使ってください。</p><div className="form-actions"><button onClick={() => setModal(null)}>キャンセル</button><button className="danger-button" onClick={() => run(async () => { await control('end'); setModal(null); })}>終了する</button></div></Dialog>}
     {modal === 'delete' && deleting && <Dialog error={error} title="この発言を削除しますか？" close={() => setModal(null)}><blockquote>{preview(deleting)}</blockquote><p className="muted">公開履歴から本文を削除します。過去の内部実行記録やバックアップからの完全消去ではありません。</p><div className="form-actions"><button onClick={() => setModal(null)}>キャンセル</button><button className="danger-button" onClick={() => run(async () => { await api(`/v1/sessions/${deleting.sessionId}/messages/${deleting.id}`, { text: null }); await refresh(deleting.sessionId); setModal(null); setDeleting(null); })}>削除する</button></div></Dialog>}
   </div>;

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { WireOutputSchemas, type Context, type ModelProfile, type RunKind, type Usage, type ModelErrorCode } from '../contracts/index.js';
 
 export class ModelError extends Error {
-  constructor(readonly code: ModelErrorCode, readonly retryAfterMs=0) { super(code); }
+  constructor(readonly code: ModelErrorCode, readonly retryAfterMs=0, readonly usage?:Usage) { super(code); }
 }
 export type Completion = { text: string; usage: Usage };
 export interface Model {
@@ -48,10 +48,11 @@ function prompt(kind: RunKind, context: Context, maxChars: number, wrapped: bool
 export function modelRequest(p:ModelProfile,kind:RunKind,context:Context,options:{maxChars:number;repair?:string}):Record<string,unknown>{
   const messages=prompt(kind,context,options.maxChars,p.jsonMode==='schema',options.repair);
   const schema={type:'object',properties:{result:outputSchema(kind)},required:['result'],additionalProperties:false};
+  const temperature=p.capabilities?.temperatureSupported===false?{}:{temperature:p.temperature};
   return p.provider==='ollama'?{
-    model:p.model,messages,stream:false,options:{num_predict:p.maxOutputTokens,temperature:p.temperature},
+    model:p.model,messages,stream:false,options:{num_predict:p.maxOutputTokens,...temperature},
     ...(p.jsonMode==='schema'?{format:schema}:p.jsonMode==='json'?{format:'json'}:{}),
-  }:{model:p.model,messages,stream:false,max_tokens:p.maxOutputTokens,temperature:p.temperature,
+  }:{model:p.model,messages,stream:false,[p.capabilities?.outputTokenParameter??'max_tokens']:p.maxOutputTokens,...temperature,
     ...(p.jsonMode==='schema'?{response_format:{type:'json_schema',json_schema:{name:'agent_output',strict:true,schema}}}:
       p.jsonMode==='json'?{response_format:{type:'json_object'}}:{}),};
 }
@@ -60,10 +61,10 @@ export function estimatedRequestTokens(body:Record<string,unknown>):number {
   return new TextEncoder().encode(JSON.stringify(body)).byteLength+512;
 }
 async function limitedText(response: Response): Promise<string> {
-  if(!response.body) throw new ModelError('API_ERROR');
+  if(!response.body) throw new ModelError('EMPTY_RESPONSE');
   const reader=response.body.getReader(); const chunks:Uint8Array[]=[]; let bytes=0;
   for(;;) { const {value,done}=await reader.read(); if(done) break; bytes+=value.byteLength;
-    if(bytes>1048576) { await reader.cancel(); throw new ModelError('API_ERROR'); } chunks.push(value); }
+    if(bytes>1048576) { await reader.cancel(); throw new ModelError('OUTPUT_TOO_LARGE'); } chunks.push(value); }
   const out=new Uint8Array(bytes); let offset=0; for(const c of chunks) { out.set(c,offset); offset+=c.byteLength; }
   return new TextDecoder().decode(out);
 }
@@ -81,18 +82,31 @@ export class HttpModel implements Model {
       const response=await this.fetcher(endpoint,{method:'POST',redirect:'error',signal:options.signal,
         headers:{'content-type':'application/json',...(this.key?{authorization:'Bearer '+this.key}:{})},body:JSON.stringify(body)});
       if(!response.ok) { await response.body?.cancel(); throw new ModelError(response.status===429?'RATE_LIMIT':[401,403].includes(response.status)?'AUTH_ERROR':'API_ERROR',retryAfter(response.headers.get('retry-after'))); }
-      const raw=JSON.parse(await limitedText(response)) as Record<string,unknown>;
-      let text:unknown,input:unknown,output:unknown;
-      if(p.provider==='ollama') { text=(raw.message as {content?:unknown})?.content; input=raw.prompt_eval_count; output=raw.eval_count; }
-      else { text=(raw.choices as {message?:{content?:unknown}}[]|undefined)?.[0]?.message?.content;
-        input=(raw.usage as {prompt_tokens?:unknown})?.prompt_tokens; output=(raw.usage as {completion_tokens?:unknown})?.completion_tokens; }
-      if(typeof text!=='string') throw new ModelError('API_ERROR');
+      const responseText=await limitedText(response);
+      let raw:Record<string,unknown>;
+      try { raw=JSON.parse(responseText);if(!raw||typeof raw!=='object'||Array.isArray(raw))throw new Error(); }
+      catch { throw new ModelError('API_ERROR'); }
+      let text:unknown,input:unknown,output:unknown,reason:unknown,refusal:unknown;
+      if(p.provider==='ollama') {
+        text=(raw.message as {content?:unknown})?.content;input=raw.prompt_eval_count;output=raw.eval_count;
+        reason=raw.done===false?'length':raw.done_reason;
+      }else{
+        const choice=(raw.choices as {finish_reason?:unknown;message?:{content?:unknown;refusal?:unknown}}[]|undefined)?.[0];
+        text=choice?.message?.content;reason=choice?.finish_reason;refusal=choice?.message?.refusal;
+        input=(raw.usage as {prompt_tokens?:unknown})?.prompt_tokens;output=(raw.usage as {completion_tokens?:unknown})?.completion_tokens;
+      }
       const token=(n:unknown)=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0?n:null;
-      return {text,usage:{inputTokens:token(input),outputTokens:token(output)}};
+      const usage:Usage={inputTokens:token(input),outputTokens:token(output)};
+      if(reason==='length')throw new ModelError('OUTPUT_TRUNCATED',0,usage);
+      if(reason==='content_filter'||typeof refusal==='string'&&refusal.length>0)throw new ModelError('RESPONSE_REFUSED',0,usage);
+      if(typeof text!=='string'||!text.trim())throw new ModelError('EMPTY_RESPONSE',0,usage);
+      if(text.length>65536)throw new ModelError('OUTPUT_TOO_LARGE',0,usage);
+      return {text,usage};
     } catch(e) {
       if(e instanceof ModelError) throw e;
       if(options.signal.aborted) throw new ModelError(options.signal.reason?.name==='TimeoutError'?'TIMEOUT':'CANCELLED');
-      throw new ModelError('API_ERROR');
+      // A transport rejection does not establish that the remote operation never started.
+      throw new ModelError('DELIVERY_UNKNOWN');
     }
   }
 }
