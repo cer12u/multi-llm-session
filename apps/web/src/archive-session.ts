@@ -52,6 +52,10 @@ export class ArchiveSession {
   /** SSE may patch loaded originals outside the latest snapshot; older versions can never resurrect text. */
   event(event:{revision:number;kind:string;message?:Patch}){
     if(!this.alive||!event.message||event.message.sessionId!==this.sessionId)return;
+    if(this.initialized&&event.revision>Math.max(this.observedRevision,this.revision)+1){
+      this.repairPending=true;
+      if(this.repairPromise)this.repairAgain=true;
+    }
     this.observedRevision=Math.max(this.observedRevision,event.revision);
     const old=this.records.get(event.message.id);
     if(old&&event.message.revision>=old.revision)this.merge([{...old,...event.message}]);
