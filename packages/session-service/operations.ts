@@ -1,3 +1,4 @@
+import { currentDisposition } from './participation.js';
 import { credential } from '../config/credentials.js';
 import { hash } from '../domain/index.js';
 import { ModelProfileSchema, type ModelProfile, type RunKind } from '../contracts/index.js';
@@ -55,6 +56,7 @@ export function operations(service:SessionService,id:string,env:NodeJS.ProcessEn
         const planned=service.store.get<{due:number|null}>("SELECT MIN(effective_at) due FROM agent_agenda WHERE agent_id=? AND status IN ('PENDING','TRIGGERED')",a.id)?.due;
         next=planned===null||planned===undefined?a.next_self_at:Math.min(a.next_self_at,planned);
       }
+      if (['QUIET','DEFERRED'].includes(reason) && currentDisposition(service.store,a) === 'CONTENT_LOOP') reason='CONTENT_LOOP';
       return {agent,frozen,latestVersion:latest.get(frozen.profile.id)??frozen.profile.version,reason,
         lastError:a.last_error,errorCount:a.error_count,nextOpportunityAt:next,waitingFor:deferral?.agentId??null,
         activeRun:run?.kind??null,candidateState:candidate?.state??null,observationPending:pending.observation,memoryPending:pending.memory};

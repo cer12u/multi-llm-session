@@ -9,6 +9,7 @@ import { validateQuestionEntry } from './questions.js';
 import { hash } from '../domain/index.js';
 import { profileOf } from '../storage-sqlite/index.js';
 import { identityCurrent } from './candidate-integrity.js';
+import { validateParticipationEntry } from './participation.js';
 
 type StateRow = { agent_id: string; version: number; entries_json: string; updated_at: number };
 const refKey = (ref: EvidenceRef) => `${ref.kind}:${ref.id}:${ref.version}`;
@@ -84,6 +85,7 @@ export class PrivateStates {
           }
         }
         validateQuestionEntry(this.store, run.session_id, entry);
+        validateParticipationEntry(context, run.kind, entry);
         if (entry.resume?.agentId) {
           const target = this.store.get<{ session_id: string }>('SELECT session_id FROM agent_instances WHERE id=?', entry.resume.agentId);
           ensure(target?.session_id === run.session_id && entry.resume.agentId !== run.agent_id, 422, 'INVALID_STATE_RESUME_TARGET');
@@ -93,6 +95,7 @@ export class PrivateStates {
       for (const id of patch.remove) { ensure(entries.has(id), 422, 'UNKNOWN_STATE_ENTRY'); entries.delete(id); }
     }
     const nextEntries = [...entries.values()];
+    ensure(nextEntries.filter(entry => entry.participation).length <= 1, 422, 'DUPLICATE_PARTICIPATION_ASSESSMENT');
     const questionIds = nextEntries.flatMap(entry => entry.question ? [entry.question.messageId] : []);
     ensure(new Set(questionIds).size === questionIds.length, 422, 'DUPLICATE_QUESTION_ASSESSMENT');
     const changed = JSON.stringify(current.entries) !== JSON.stringify(nextEntries);
