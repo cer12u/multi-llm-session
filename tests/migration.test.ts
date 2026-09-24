@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {Store,legacySchemaV1} from '../packages/storage-sqlite/index.js';
+import {CURRENT_SCHEMA_VERSION} from '../packages/storage-sqlite/schema-version.js';
 import {SessionService} from '../packages/session-service/index.js';
 import {fixture} from './helpers.js';
 
@@ -12,7 +13,7 @@ it('migrates a populated v1 database without dropping messages, old memory, pers
   const dir=mkdtempSync(join(tmpdir(),'schema-migration-')),file=join(dir,'db.sqlite'),f=fixture();
   const config=f.config;f.close();const session=randomUUID(),agent=randomUUID(),root=randomUUID();
   const old=new Database(file);old.exec(legacySchemaV1);
-  const settings={...config.defaults,maxDurationMs:900000,selfWakeMinMs:900000,selfWakeMaxMs:2700000} as Record<string,unknown>;delete settings.selfWakeEnabled;
+  const settings={...config.defaults,maxDurationMs:900000,selfWakeMinMs:900000,selfWakeMaxMs:2700000} as Record<string,unknown>;delete settings.selfWakeEnabled;delete settings.contextTokens;
   old.prepare('INSERT INTO sessions(id,title,lifecycle,created_at,last_activity_at,settings_json,revision) VALUES(?,?,?,?,?,?,?)').run(session,'既存セッション','DRAFT',1000,1000,JSON.stringify(settings),260);
   old.prepare('INSERT INTO workers(slot) VALUES(?)').run('worker-0');
   old.prepare('INSERT INTO agent_instances(id,session_id,slot,character_json,profile_json,next_self_at) VALUES(?,?,?,?,?,?)').run(agent,session,'worker-0',JSON.stringify(config.characters[0]),JSON.stringify(config.profiles[0]),900000);
@@ -24,9 +25,10 @@ it('migrates a populated v1 database without dropping messages, old memory, pers
   let db:Store|undefined;
   try{
     db=new Store(file);const service=new SessionService(db,config,()=>1000000);
-    expect(db.db.pragma('user_version',{simple:true})).toBe(5);
+    expect(db.db.pragma('user_version',{simple:true})).toBe(CURRENT_SCHEMA_VERSION);
     expect((service.exportSession(session).transcript as unknown[])).toHaveLength(260);
-    expect(service.workerMemories('worker-0',agent)).toHaveLength(60);
+    const retained=service.workerMemories('worker-0',agent);expect(retained).toHaveLength(60);
+    expect(retained.every(m=>m.provenance?.meaning===null&&m.provenance.evidence===null&&m.provenance.verified===false)).toBe(true);
     expect(service.pages.thread(session,root,{limit:200}).items).toHaveLength(200);
     expect(service.snapshot(session).session.settings.maxDurationMs).toBe(900000);
     expect(service.snapshot(session).session.settings.selfWakeEnabled).toBe(false);

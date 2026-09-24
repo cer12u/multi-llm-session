@@ -9,6 +9,7 @@ const versionTables:Record<number,string[]>={
   2:['provider_health','model_profiles'],3:['agent_private_states','agent_state_updates'],
   4:['agent_input_log','agent_input_cursors','agent_input_receipts','memory_input_origins','candidate_state_bindings'],
   5:['agent_agenda','agent_agenda_bindings','agent_agenda_clock'],
+  6:['memory_metadata','memory_edges','memory_changes'],
 };
 export type StorageReport={schemaVersion:number;sqliteVersion:string;integrity:'ok';foreignKeyViolations:0;
   pageBytes:number;freeBytes:number;fileBytes:number;walBytes:number;rows:Record<string,number>};
@@ -46,7 +47,6 @@ function report(db:Database.Database,path:string):StorageReport {
 export function inspectDatabase(source:string):StorageReport {
   const path=existing(source),db=openExisting(path);try{return report(db,path);}finally{db.close();}
 }
-
 /** SQLite backup API includes committed WAL data; never copy only the live .sqlite file. Destination is create-only. */
 export async function backupDatabase(source:string,destination:string):Promise<StorageReport>{
   const src=existing(source),target=resolve(destination);
@@ -67,7 +67,6 @@ export async function backupDatabase(source:string,destination:string):Promise<S
 }
 /** Restore to a new path. Existing operational DB/WAL files are never replaced automatically. */
 export async function restoreDatabase(backup:string,destination:string):Promise<StorageReport>{return backupDatabase(backup,destination);}
-
 /** Explicit offline operation, not an additional long-running DB writer. Caller must stop Core and workers first. */
 export function maintainDatabase(source:string,acknowledgeOffline:boolean):StorageReport {
   if(!acknowledgeOffline)throw new Error('STORAGE_OFFLINE_ACK_REQUIRED');

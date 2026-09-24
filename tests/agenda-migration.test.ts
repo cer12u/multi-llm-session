@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fixture } from './helpers.js';
 import { Store } from '../packages/storage-sqlite/index.js';
+import { CURRENT_SCHEMA_VERSION } from '../packages/storage-sqlite/schema-version.js';
 import { SessionService } from '../packages/session-service/index.js';
 
 it('R3-AGENDA-016: populated V4 migration preserves state, input receipts and limits while fencing old runs', () => {
@@ -19,10 +20,10 @@ it('R3-AGENDA-016: populated V4 migration preserves state, input receipts and li
     f.say('Unfinished input'); const oldRun = f.claim()!;
     const before = f.store.get<{entries_json:string;version:number}>('SELECT * FROM agent_private_states WHERE agent_id=?', state.agentId)!;
     const receiptCount = f.store.all('SELECT * FROM agent_input_receipts').length;
-    // Construct the genuine additive V4 fixture; never use this sequence as an operational rollback.
-    f.store.db.exec('DROP TABLE agent_agenda_bindings; DROP TABLE agent_agenda_clock; DROP TABLE agent_agenda; PRAGMA user_version=4;'); f.close();
+    // Remove every post-V4 additive object in this synthetic fixture, never in an operational rollback.
+    f.store.db.exec('DROP TABLE memory_changes; DROP TABLE memory_edges; DROP TABLE memory_metadata; DROP TABLE agent_agenda_bindings; DROP TABLE agent_agenda_clock; DROP TABLE agent_agenda; PRAGMA user_version=4;'); f.close();
     db = new Store(f.config.dbPath); const service = new SessionService(db, f.config, f.now); service.recover();
-    expect(db.db.pragma('user_version', {simple:true})).toBe(5);
+    expect(db.db.pragma('user_version', {simple:true})).toBe(CURRENT_SCHEMA_VERSION);
     expect(db.get('SELECT entries_json,version FROM agent_private_states WHERE agent_id=?', state.agentId)).toEqual({ entries_json: before.entries_json, version: before.version });
     expect(service.archiveMessage(f.id, source.id).text).toBe('Retained V4 original');
     expect(db.all('SELECT * FROM agent_input_receipts')).toHaveLength(receiptCount);
