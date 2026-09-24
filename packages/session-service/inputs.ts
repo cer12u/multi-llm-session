@@ -1,7 +1,7 @@
 import { MeaningMemoryRetriever, recallRequest, type MemoryRetriever } from './recall.js';
 import { AppError, ensure, InputWindowSchema, type Context, type InputProgress, type InputWindow, type RunKind, type Settings } from '../contracts/index.js';
 import { profileOf, type Store, type AgentRow, type MessageRow, type RunRow } from '../storage-sqlite/index.js';
-import { boundedContext, contextFits } from '../models/context-budget.js';
+import { boundedContext, contextFits, lookupSelectionSettings } from '../models/context-budget.js';
 import { memoriesCurrent } from './memory-ledger.js';
 
 type CursorRow = { agent_id: string; observed_input: number; memory_input: number; memory_target: number; foreground_runs: number };
@@ -64,8 +64,12 @@ export class AgentInputs {
     if(kind!=='observe')context.recall={algorithm:'owner-meaning-v2',selected:[],
       omittedForBudget:Array.from({length:12},()=> '00000000-0000-4000-8000-000000000000'),candidates:12,additionalCalls:0,elapsedMs:999999999};
     const coverage=()=>{if(context.coverage)context.coverage.complete=!!coverageComplete&&context.delivery!.complete;};
-    coverage();const fits = () => contextFits(context,kind,profile,settings);
-    ensure(fits(), 422, 'CONTEXT_LIMIT');
+    coverage();
+    let selectionSettings=memory?settings:lookupSelectionSettings(profile,settings);
+    const fits=()=>contextFits(context,kind,profile,selectionSettings);
+    // Existing private state/review evidence takes priority over optional lookup headroom.
+    if(!fits())selectionSettings=settings;
+    ensure(fits(),422,'CONTEXT_LIMIT');
     for (const row of rows) {
       const message = row.kind === 'message' ? this.store.get<MessageRow>('SELECT * FROM messages WHERE id=? AND session_id=?', row.entity_id, agent.session_id) : undefined;
       const source = row.kind === 'source' ? this.store.get<SourceRow>('SELECT * FROM source_items WHERE id=? AND session_id=?', row.entity_id, agent.session_id) : undefined;
@@ -79,6 +83,8 @@ export class AgentInputs {
         eventVersion: row.version, version, superseded: version !== row.version, excerpt: !!source && source.text.length > 1600 });
       context.delivery!.throughInput=row.id;context.delivery!.complete=row.id>=target;coverage();
       if (!fits()) {
+        // Do not starve one indivisible input merely to reserve optional search space.
+        if(context.delivery!.entries.length===1&&contextFits(context,kind,profile,settings))break;
         context.delivery!.entries.pop(); context.messages.length = previousMessages; context.sources.length = previousSources;
         context.delivery!.throughInput=previousThrough;context.delivery!.complete=previousThrough>=target;coverage();
         ensure(context.delivery!.entries.length > 0, 422, 'CONTEXT_LIMIT'); break;
