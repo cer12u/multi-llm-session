@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixture } from './helpers.js';
+import { asV6Fixture } from './fixtures/session-v6.js';
 import { Store } from '../packages/storage-sqlite/index.js';
 import { CURRENT_SCHEMA_VERSION } from '../packages/storage-sqlite/schema-version.js';
 import { SessionService } from '../packages/session-service/index.js';
@@ -50,8 +51,9 @@ describe('R2 private working state: transactions and ownership, not natural-lang
     if (field === 'session') change.sessionId = f.service.createSession(f.input, randomUUID()).id;
     if (field === 'version') change.expectedVersion++;
     if (field === 'observation') change.observationId = '0'.repeat(64);
-    const code = field === 'version' ? 'STALE_PRIVATE_STATE' : field === 'observation' ? 'STATE_OBSERVATION_MISMATCH' : 'STATE_OWNER_MISMATCH';
-    expect(() => f.finish(r, output(r, change))).toThrow(code);
+    const code = field === 'version' ? 'STALE_PRIVATE_STATE' : field === 'observation' ? 'STATE_OWNER_MISMATCH' : 'STATE_OWNER_MISMATCH';
+    const expected = field === 'observation' ? 'STATE_OBSERVATION_MISMATCH' : code;
+    expect(() => f.finish(r, output(r, change))).toThrow(expected);
     expect(state(f).version).toBe(0);
     expect(f.store.all('SELECT * FROM agent_state_updates')).toHaveLength(0);
   });
@@ -191,7 +193,8 @@ it('R2-STATE-020: a populated V2 database migrates with notes, IDs, settings and
   const agent = f.service.agents(f.id)[0], memoryId = randomUUID();
   f.store.run('INSERT INTO memories(id,agent_id,text,sources_json,created_at,sequence) VALUES(?,?,?,?,?,?)', memoryId, agent.id, '出典の確度を勝手に昇格しない旧メモ', JSON.stringify([source.id]), f.now(), 1);
   f.store.run('UPDATE agent_instances SET memory_seq=1 WHERE id=?', agent.id);
-  // Construct V2 by removing every additive V3–V6 object. This is not a rollback procedure.
+  // Construct genuine V2 by removing all later objects in an isolated fixture, never an operational rollback.
+  asV6Fixture(f.store.db);
   f.store.db.exec(`DROP TABLE memory_changes; DROP TABLE memory_edges; DROP TABLE memory_metadata;
     DROP TABLE agent_agenda_bindings; DROP TABLE agent_agenda_clock; DROP TABLE agent_agenda;
     DROP TRIGGER input_message_insert; DROP TRIGGER input_message_update; DROP TRIGGER input_source_insert;
