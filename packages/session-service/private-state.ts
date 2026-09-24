@@ -5,6 +5,7 @@ import {
 } from '../contracts/index.js';
 import type { Store, AgentRow, RunRow } from '../storage-sqlite/index.js';
 import { currentMemoryPredicate } from './memory-ledger.js';
+import { validateQuestionEntry } from './questions.js';
 
 type StateRow = { agent_id: string; version: number; entries_json: string; updated_at: number };
 const refKey = (ref: EvidenceRef) => `${ref.kind}:${ref.id}:${ref.version}`;
@@ -76,6 +77,7 @@ export class PrivateStates {
             ensure(source?.session_id === run.session_id && source.fetched_at === ref.version, 422, 'STALE_STATE_EVIDENCE');
           }
         }
+        validateQuestionEntry(this.store, run.session_id, entry);
         if (entry.resume?.agentId) {
           const target = this.store.get<{ session_id: string }>('SELECT session_id FROM agent_instances WHERE id=?', entry.resume.agentId);
           ensure(target?.session_id === run.session_id && entry.resume.agentId !== run.agent_id, 422, 'INVALID_STATE_RESUME_TARGET');
@@ -85,6 +87,8 @@ export class PrivateStates {
       for (const id of patch.remove) { ensure(entries.has(id), 422, 'UNKNOWN_STATE_ENTRY'); entries.delete(id); }
     }
     const nextEntries = [...entries.values()];
+    const questionIds = nextEntries.flatMap(entry => entry.question ? [entry.question.messageId] : []);
+    ensure(new Set(questionIds).size === questionIds.length, 422, 'DUPLICATE_QUESTION_ASSESSMENT');
     const changed = JSON.stringify(current.entries) !== JSON.stringify(nextEntries);
     const next = PrivateStateSchema.parse({ ...current, entries: nextEntries,
       version: current.version + (changed ? 1 : 0), updatedAt: changed ? this.now() : current.updatedAt });

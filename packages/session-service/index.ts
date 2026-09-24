@@ -4,6 +4,7 @@ import { MemoryLedger, memoryNote, memoriesCurrent, currentMemoryPredicate, type
 import { boundedContext } from '../models/context-budget.js';
 import { AgentInputs } from './inputs.js';
 import { PrivateStates } from './private-state.js';
+import { questionHints } from './questions.js';
 import { ArchivePages } from './pages.js';
 import { ProviderState, providerScope } from '../provider-state/index.js';
 import { validateProfileUrl } from '../config/credentials.js';
@@ -283,7 +284,7 @@ export class SessionService {
       id,session,revision,author,text,intent.act,intent.replyTo,JSON.stringify(intent.addressedTo),candidateId,episode,now,sequence,threadRoot);
     this.store.run('INSERT INTO messages_fts(message_id,session_id,text) VALUES(?,?,?)',id,session,text);
     if(intent.act==='question') for(const target of intent.addressedTo.length?intent.addressedTo:['*']) this.store.run('INSERT INTO pending_questions(message_id,target) VALUES(?,?)',id,target);
-    if(intent.replyTo&&['answer','correction'].includes(intent.act)) this.store.run("UPDATE pending_questions SET answered_by=? WHERE message_id=? AND (target=? OR target='*') AND answered_by IS NULL",id,intent.replyTo,author??'human');
+    // A reply/answer declaration is not proof of semantic resolution. Each Agent records its own assessment.
     for(const a of this.agents(session)) {
       if(a.id===author) this.store.run('UPDATE agent_instances SET last_post_at=?,processed_revision=?,dirty_revision=? WHERE id=?',now,revision,revision,a.id);
       else this.wake(a.id,intent.addressedTo.includes(a.id)?'DIRECTED':'MESSAGE',author);
@@ -295,7 +296,7 @@ export class SessionService {
     const data=MessageInputSchema.parse(input);
     return this.receipt(`operator:${session}:message`,key,data,()=>{
       ensure(this.session(session).lifecycle!=='ENDED',409,'SESSION_ENDED');
-      return this.append(session,null,data.text,{act:data.addressedTo.length?'question':'comment',intent:'Human contribution',replyTo:data.replyTo,addressedTo:data.addressedTo},null);
+      return this.append(session,null,data.text,{act:data.act??'comment',intent:'Human contribution',replyTo:data.replyTo,addressedTo:data.addressedTo},null);
     });
   }
   changeMessage(session: string, messageId: string, text: string|null, key: string): PublicMessage {
@@ -359,9 +360,7 @@ export class SessionService {
     while(rows.length>1&&chars>st.contextChars/2) { chars-=rows[0].text.length; rows.shift(); }
     const messages=rows.map(m=>this.publicMessage(m));
     const memories=this.pages.memories(agent.id,'',{limit:12}).items.reverse();
-    const questions=this.store.all<{message_id:string;text:string;author_id:string|null}>(
-      "SELECT q.message_id,m.text,m.author_id FROM pending_questions q JOIN messages m ON m.id=q.message_id WHERE m.session_id=? AND m.deleted=0 AND q.answered_by IS NULL AND (q.target=? OR q.target='*') ORDER BY m.revision DESC LIMIT 8",s.id,agent.id)
-      .map(q=>({messageId:q.message_id,text:q.text.slice(0,800),from:q.author_id}));
+    const questions=questionHints(this.store,agent,this.privateStates.read(agent.id,s.id));
     const sources=this.store.all<{id:string;title:string;text:string;url:string|null;published_at:string|null;fetched_at:number}>(
       'SELECT * FROM source_items WHERE session_id=? ORDER BY fetched_at DESC,rowid DESC LIMIT 4',s.id)
       .map(x=>({id:x.id,title:x.title,text:x.text.slice(0,1600),url:x.url,publishedAt:x.published_at,fetchedAt:x.fetched_at}));
