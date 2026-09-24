@@ -147,7 +147,7 @@ export type Snapshot = { session: PublicSession; agents: PublicAgent[]; messages
 export type PublicEvent = { id: string; sessionId: string; kind: string; revision: number;
   createdAt: number; message?: PublicMessage; data: Record<string, unknown> };
 export type Context = {
-  self: { id: string; character: Character; privateState?: PrivateState }; observation?: ObservationManifest; participants: PublicAgent[]; revision: number; trigger: string;
+  self: { id: string; character: Character; profileHash?: string; privateState?: PrivateState }; observation?: ObservationManifest; participants: PublicAgent[]; revision: number; trigger: string;
   messages: PublicMessage[]; delta: PublicMessage[]; historyTruncated: boolean;
   agenda?: AgendaContext;
   delivery?: InputWindow; progress?: InputProgress; selection?: InputSelection;

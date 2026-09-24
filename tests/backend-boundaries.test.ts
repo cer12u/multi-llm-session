@@ -82,7 +82,7 @@ describe('backend boundaries: corrected invariants, not live model acceptance',(
       for(const m of review.context.delta)seen.add(m.id);
       const coverage=review.context.coverage!;expect(coverage.throughRevision).toBeLessThanOrEqual(coverage.targetRevision);
       expect(review.context.delta.length).toBeLessThanOrEqual(100);
-      f.finish(review,{decision:'KEEP'});
+      f.finish(review,coverage.complete?{decision:'KEEP'}:{decision:'REWRITE',text:review.context.candidate!.text!,intent:review.context.candidate!.intent});
       if(!coverage.complete){expect(f.service.commitNext(f.id)).toBeNull();expect(rounds).toBeLessThan(40);continue;}
       expect(f.service.commitNext(f.id)?.text).toBe('候補');break;
     }
@@ -92,7 +92,7 @@ describe('backend boundaries: corrected invariants, not live model acceptance',(
     const f=setup(3,{contextChars:8000,memoryEvery:1000});const first=f.say('初期');f.start();f.speak(run(f.claim()));f.finish(run(f.claim()),{decision:'DRAFT',text:'候補'});
     for(let i=0;i<12;i++)f.say('長めの変更 '.repeat(120));
     const review=run(f.claim());expect(review.context.coverage?.complete).toBe(false);
-    f.service.changeMessage(f.id,first.id,'修正後の原文',randomUUID());f.finish(review,{decision:'KEEP'});
+    f.service.changeMessage(f.id,first.id,'修正後の原文',randomUUID());f.finish(review,{decision:'REWRITE',text:review.context.candidate!.text!,intent:review.context.candidate!.intent});
     expect(f.service.commitNext(f.id)).toBeNull();
   });
   it('normal conversation events never clear error counts or shorten persisted retry times',()=>{

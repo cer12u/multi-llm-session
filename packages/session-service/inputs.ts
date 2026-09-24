@@ -3,6 +3,7 @@ import { AppError, ensure, InputWindowSchema, type Context, type InputProgress, 
 import { profileOf, type Store, type AgentRow, type MessageRow, type RunRow } from '../storage-sqlite/index.js';
 import { boundedContext, contextFits, lookupSelectionSettings } from '../models/context-budget.js';
 import { memoriesCurrent } from './memory-ledger.js';
+import { identityCurrent, candidateIdentityCurrent } from './candidate-integrity.js';
 
 type CursorRow = { agent_id: string; observed_input: number; memory_input: number; memory_target: number; foreground_runs: number };
 type InputRow = { id: number; session_id: string; kind: 'message' | 'source'; entity_id: string; version: number; created_at: number };
@@ -146,7 +147,9 @@ export class AgentInputs {
     return window;
   }
   reusable(run: RunRow): boolean {
-    const captured = (JSON.parse(run.context_json) as Context).self.privateState;
+    const context=JSON.parse(run.context_json) as Context;
+    if(!identityCurrent(this.store,run.agent_id,context))return false;
+    const captured = context.self.privateState;
     const current = this.store.get<{version:number}>('SELECT version FROM agent_private_states WHERE agent_id=?', run.agent_id);
     if (!captured || captured.version !== (current?.version ?? 0)||!memoriesCurrent(this.store,run)) return false;
     try { this.validate(run); return true; }
@@ -178,6 +181,6 @@ export class AgentInputs {
   candidateCurrent(candidateId: string, agentId: string): boolean {
     const binding = this.store.get<{ state_version: number }>('SELECT state_version FROM candidate_state_bindings WHERE candidate_id=?', candidateId);
     const current = this.store.get<{ version: number }>('SELECT version FROM agent_private_states WHERE agent_id=?', agentId);
-    return !!binding && binding.state_version === (current?.version ?? 0);
+    return !!binding && binding.state_version === (current?.version ?? 0) && candidateIdentityCurrent(this.store,candidateId,agentId);
   }
 }

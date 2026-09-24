@@ -5,6 +5,7 @@ import { boundedContext } from '../models/context-budget.js';
 import { AgentInputs } from './inputs.js';
 import { PrivateStates } from './private-state.js';
 import { questionHints } from './questions.js';
+import { requireReviewReconstruction } from './candidate-integrity.js';
 import { ArchivePages } from './pages.js';
 import { ProviderState, providerScope } from '../provider-state/index.js';
 import { validateProfileUrl } from '../config/credentials.js';
@@ -529,6 +530,7 @@ export class SessionService {
         this.trace(s.id,a.id,id,result.decision,{stale:!ready});
       } else if(r.kind==='review') {
         const result=ReviewSchema.parse(action); ensure(c,409,'CANDIDATE_MISSING');
+        requireReviewReconstruction(JSON.parse(r.context_json) as Context,result.decision);
         if(result.decision==='DROP') this.store.run("UPDATE candidates SET state='DROPPED',reason='MODEL_DROP' WHERE id=?",c.id);
         else if(result.decision==='DEFER') this.defer(a.id,result.defer);
         else {
@@ -558,7 +560,7 @@ export class SessionService {
       this.agenda.sync(a,this.privateStates.read(a.id,s.id),st,delivery.throughInput);
       const active=this.candidate(a.id);
       if(active&&['decide','draft','review'].includes(r.kind)) this.inputs.bindCandidate(active.id,stateResult.version);
-      else if(active?.state==='READY'&&stateResult.changed) this.store.run("UPDATE candidates SET state='NEEDS_REVIEW',reason='PRIVATE_STATE_CHANGED' WHERE id=?",active.id);
+      else if(active?.state==='READY'&&stateResult.changed) this.store.run("UPDATE candidates SET state='NEEDS_REVIEW',reason='PRIVATE_STATE_CHANGED' WHERE agent_id=? AND state='READY'",a.id);
       this.store.run("UPDATE runs SET state='DONE',result_hash=?,result_json=? WHERE id=?",digest,JSON.stringify({ok:true}),id);
       if(r.kind!=='memory'&&r.kind!=='observe') this.store.run('UPDATE agent_instances SET processed_revision=MAX(processed_revision,?),processed_wake=MAX(processed_wake,?) WHERE id=?',r.snapshot_revision,delivery.complete?r.wake_seq:a.processed_wake,a.id);
       const next=this.agent(a.id),cand=this.candidate(a.id);
