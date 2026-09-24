@@ -78,20 +78,18 @@ it('R4-REVIEW-004: five-times-slower generation and repeated interrupts preserve
     f.advance(399);f.finish(drafts[2],{decision:'DRAFT',text:'5倍遅い参加者の候補'});
     const reviews=[f.claim(slots[1])!,f.claim(slots[2])!];
     f.finish(newFast,{decision:'DRAFT',text:'速い参加者の新しい候補'});
-    for(const [i,run] of reviews.entries())f.finish(run,{decision:'REWRITE',text:i?'5倍遅い参加者の更新候補':'二人目の更新候補',intent:run.context.candidate!.intent});
-    const firstOld=f.service.commitNext(f.id)!;expect(firstOld.authorId).not.toBe(agents[0].id);
-    let slowPosted=firstOld.authorId===agents[2].id;
-    if(!slowPosted){
-      for(let i=0;i<3;i++){
-        const run=f.claim(slots[2])!;expect(run.kind).toBe('review');f.say('連続する人間の割込み '+i);
-        f.finish(run,{decision:'REWRITE',text:'割込みも踏まえた遅い候補 '+i,intent:run.context.candidate!.intent});
-        expect(candidate(f,agents[2].id).id).toBe(slowId);expect(candidate(f,agents[2].id).first_interested_at).toBe(interested);
-        expect(f.service.commitNext(f.id)).toBeNull();f.advance(100);
-      }
-      const final=f.claim(slots[2])!;f.finish(final,{decision:'REWRITE',text:'追従完了した遅い候補',intent:final.context.candidate!.intent});
-      expect(f.service.commitNext(f.id)?.authorId).toBe(agents[2].id);slowPosted=true;
+    f.finish(reviews[0],{decision:'REWRITE',text:'二人目の更新候補',intent:reviews[0].context.candidate!.intent});
+    // Different eligible times resolve the equal-interest tie deterministically, not a fixed production order.
+    f.advance(1);f.finish(reviews[1],{decision:'REWRITE',text:'5倍遅い参加者の更新候補',intent:reviews[1].context.candidate!.intent});
+    const firstOld=f.service.commitNext(f.id)!;expect(firstOld.authorId).toBe(agents[1].id);
+    for(let i=0;i<3;i++){
+      const run=f.claim(slots[2])!;expect(run.kind).toBe('review');f.say('連続する人間の割込み '+i);
+      f.finish(run,{decision:'REWRITE',text:'割込みも踏まえた遅い候補 '+i,intent:run.context.candidate!.intent});
+      expect(candidate(f,agents[2].id).id).toBe(slowId);expect(candidate(f,agents[2].id).first_interested_at).toBe(interested);
+      expect(f.service.commitNext(f.id)).toBeNull();f.advance(100);
     }
-    expect(slowPosted).toBe(true);
+    const final=f.claim(slots[2])!;f.finish(final,{decision:'REWRITE',text:'追従完了した遅い候補',intent:final.context.candidate!.intent});
+    expect(f.service.commitNext(f.id)?.authorId).toBe(agents[2].id);
     const completed=f.store.get<CandidateRow>('SELECT * FROM candidates WHERE id=?',slowId)!;
     expect(completed.first_interested_at).toBe(interested);expect(completed.state).toBe('COMMITTED');
     const report={mode:'synthetic-injected-clock',fastGenerationMs:100,slowGenerationMs:500,

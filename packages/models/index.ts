@@ -123,7 +123,7 @@ export class MockModel implements Model {
     if(kind==='observe') value={decision:'ABSTAIN',reason:'Mock input-delivery fixture'};
     else if(kind==='decide') value=own>=2||['IDLE','SELF_WAKE'].includes(c.trigger)?{decision:'ABSTAIN',reason:'Mock fixture has no further contribution'}:{decision:'SPEAK',intent};
     else if(kind==='draft') value={decision:'DRAFT',text:`【模擬応答】${c.self.character.name}です。${last?`${last.authorName}の「${[...last.text].slice(0,45).join('')}」を読みました。`:'別々の参加者として会話を始めます。'}これはAPIキー不要の制御検証です。`};
-    else if(kind==='review') value=own>=2?{decision:'DROP',reason:'Mock contribution already made'}:c.delta.length?{
+    else if(kind==='review') value=own>=2?{decision:'DROP',reason:'Mock contribution already made'}:c.coverage?.complete===false&&!c.delta.length?{decision:'REWRITE',intent:c.candidate?.intent??intent,text:c.candidate?.text??'【模擬応答】未処理入力を確認中です。'}:c.delta.length?{
       decision:'REWRITE',intent,text:`【模擬応答・再確認】${c.self.character.name}です。${last?.authorName??'参加者'}の新しい発言を受け、先ほどの候補を更新しました。参照: ${last?.id.slice(0,8)??'none'}。`,
     }:{decision:'KEEP'};
     else value={notes:last?[{text:'検証会話で参照した発言: '+[...last.text].slice(0,100).join(''),sourceMessageIds:[last.id]}]:[]};
