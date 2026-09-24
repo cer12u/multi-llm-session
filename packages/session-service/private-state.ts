@@ -6,6 +6,9 @@ import {
 import type { Store, AgentRow, RunRow } from '../storage-sqlite/index.js';
 import { currentMemoryPredicate } from './memory-ledger.js';
 import { validateQuestionEntry } from './questions.js';
+import { hash } from '../domain/index.js';
+import { profileOf } from '../storage-sqlite/index.js';
+import { identityCurrent } from './candidate-integrity.js';
 
 type StateRow = { agent_id: string; version: number; entries_json: string; updated_at: number };
 const refKey = (ref: EvidenceRef) => `${ref.kind}:${ref.id}:${ref.version}`;
@@ -27,7 +30,7 @@ export class PrivateStates {
   /** Recomputed after LOOKUP. Its ID binds the exact context, including private state and evidence text. */
   prepare(agent: AgentRow, input: Context): Context {
     const { observation: _previous, ...withoutManifest } = input;
-    const context: Context = { ...withoutManifest, self: { ...input.self, privateState: this.read(agent.id, agent.session_id) } };
+    const context: Context = { ...withoutManifest, self: { ...input.self, profileHash: hash(profileOf(agent)), privateState: this.read(agent.id, agent.session_id) } };
     context.observation = this.manifest(context);
     return context;
   }
@@ -49,6 +52,7 @@ export class PrivateStates {
     ensure(captured && observed && context.self.id === run.agent_id, 409, 'STATE_CONTEXT_REQUIRED');
     ensure(captured.agentId === run.agent_id && captured.sessionId === run.session_id, 403, 'STATE_OWNER_MISMATCH');
     ensure(observed.id === this.manifest(context).id, 409, 'STATE_OBSERVATION_MISMATCH');
+    ensure(identityCurrent(this.store,run.agent_id,context),409,'STALE_AGENT_IDENTITY');
     const current = this.read(run.agent_id, run.session_id);
     ensure(captured.version === current.version, 409, 'STALE_PRIVATE_STATE');
     const suppliedMemories=new Set([...context.memories,...(context.retrieved??[]).flatMap(r=>r.memories)].map(m=>m.id));
