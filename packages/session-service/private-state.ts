@@ -29,6 +29,8 @@ export class PrivateStates {
 
   /** Recomputed after LOOKUP. Its ID binds the exact context, including private state and evidence text. */
   prepare(agent: AgentRow, input: Context): Context {
+    // A previously bound request cannot acquire a new identity merely by retrieving more evidence.
+    if(input.observation)ensure(identityCurrent(this.store,agent.id,input),409,'STALE_AGENT_IDENTITY');
     const { observation: _previous, ...withoutManifest } = input;
     const context: Context = { ...withoutManifest, self: { ...input.self, profileHash: hash(profileOf(agent)), privateState: this.read(agent.id, agent.session_id) } };
     context.observation = this.manifest(context);
