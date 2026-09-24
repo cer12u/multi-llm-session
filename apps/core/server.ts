@@ -9,6 +9,7 @@ import { credential } from '../../packages/config/credentials.js';
 import { SessionService } from '../../packages/session-service/index.js';
 import { registerCharacterRoutes } from './character-routes.js';
 import { registerOperationsRoutes } from './operations-routes.js';
+import { registerMembershipRoutes } from './membership-routes.js';
 
 type Role='operator'|'viewer';
 type Login={role:Role;csrf:string;expires:number};
@@ -61,7 +62,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   }
   function key(req:FastifyRequest):string { return header(req,'idempotency-key'); }
   function sessionId(req:FastifyRequest):string { return ParamId.parse(req.params).id; }
-  function ownAgent(req:FastifyRequest,agentId:string):string { const slot=worker(req); ensure(service.agent(agentId).slot===slot,403,'PRIVATE_STATE_FORBIDDEN'); return slot; }
+  function ownAgent(req:FastifyRequest,agentId:string):string { const slot=worker(req),agent=service.agent(agentId); ensure(agent.slot===slot&&agent.retired_at===null,403,'PRIVATE_STATE_FORBIDDEN'); return slot; }
   app.get('/healthz',async()=>({ok:true,sqlite:service.store.sqliteVersion}));
   app.post('/v1/auth/login',async(req,reply)=>{
     ensure(header(req,'origin')===config.publicOrigin,403,'ORIGIN_REQUIRED');
@@ -92,6 +93,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   app.post('/v1/model-profiles',async req=>{principal(req,true,true);return service.putModelProfile(req.body);});
   app.post('/v1/model-profiles/:profile/retry',async req=>{principal(req,true,true);const {profile}=z.object({profile:Slug}).parse(req.params);return service.retryProvider(profile,key(req));});
   registerOperationsRoutes(app,service,(req,write=false)=>{ principal(req,write,true); });
+  registerMembershipRoutes(app,service,(req,write=false,operator=false)=>{ principal(req,write,operator); });
   app.get('/v1/characters',async req=>{
     const p=principal(req);return service.characters().map(c=>p.role==='operator'?c:{schemaVersion:c.schemaVersion,id:c.id,version:c.version,name:c.name,presentationRef:c.presentationRef});
   });
@@ -123,7 +125,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   app.get('/v1/sessions/:id/search',async req=>{principal(req);const q=z.object({q:z.string().min(1).max(200)}).parse(req.query);return service.searchArchive(sessionId(req),q.q);});
   app.get('/v1/sessions/:id/archive/:messageId',async req=>{principal(req);const p=z.object({id:Id,messageId:Id}).parse(req.params);return service.archiveMessage(p.id,p.messageId);});
   app.get('/v1/sessions/:id/commands/:operation/:key',async req=>{
-    principal(req,false,true);const p=z.object({id:Id,operation:z.enum(['message','lifecycle','edit','settings','membership']),key:z.string().max(128)}).parse(req.params);
+    principal(req,false,true);const p=z.object({id:Id,operation:z.enum(['message','lifecycle','edit','settings','membership','participants','clone']),key:z.string().max(128)}).parse(req.params);
     return service.commandReceipt(p.id,p.operation,p.key);
   });
   app.get('/v1/sessions/:id/diagnostics',async req=>{principal(req,false,true);return service.diagnostics(sessionId(req));});

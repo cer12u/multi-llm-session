@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { MembershipUpdateSchema, SessionCloneSchema } from '../contracts/session-membership.js';
+import { applyMembership, cloneDefinitions, closeEpisode, episodes as sessionEpisodes, membershipReport, publishedAuthor } from './membership.js';
 import { AgentAgenda } from './agenda.js';
 import { MemoryLedger, memoryNote, memoriesCurrent, currentMemoryPredicate, type MemoryRow } from './memory-ledger.js';
 import { boundedContext } from '../models/context-budget.js';
@@ -52,7 +54,7 @@ export class SessionService {
   private write<T>(fn: () => T): T { const result = this.store.tx(fn); this.changes.emit('changed'); return result; }
   session(id: string): SessionRow { const s = this.store.get<SessionRow>('SELECT * FROM sessions WHERE id=?', id); ensure(s,404,'SESSION_NOT_FOUND'); return s; }
   agent(id: string): AgentRow { const a = this.store.get<AgentRow>('SELECT * FROM agent_instances WHERE id=?',id); ensure(a,404,'AGENT_NOT_FOUND'); return a; }
-  agents(id: string): AgentRow[] { return this.store.all<AgentRow>('SELECT * FROM agent_instances WHERE session_id=? ORDER BY rowid',id); }
+  agents(id: string): AgentRow[] { return this.store.all<AgentRow>('SELECT * FROM agent_instances WHERE session_id=? AND retired_at IS NULL ORDER BY rowid',id); }
   private candidate(id: string): CandidateRow|undefined { return this.store.get<CandidateRow>(activeCandidateSQL,id); }
   private emit(id: string, kind: string, data: Record<string,unknown>): void {
     this.store.run('INSERT INTO events(session_id,kind,revision,payload,created_at) VALUES(?,?,?,?,?)',id,kind,this.session(id).revision,JSON.stringify(data),this.now());
@@ -97,7 +99,7 @@ export class SessionService {
       else {
         const policy=(x:ModelProfile)=>JSON.stringify([x.maxConcurrent,x.failureThreshold,x.circuitCooldownMs]);
         for(const other of this.modelProfiles().filter(x=>x.id!==p.id)) ensure(providerScope(other)!==providerScope(p)||policy(other)===policy(p),422,'CONFLICTING_PROVIDER_POLICY');
-        for(const agent of this.store.all<AgentRow>("SELECT a.* FROM agent_instances a JOIN sessions s ON s.id=a.session_id WHERE s.lifecycle!='ENDED'")) {
+        for(const agent of this.store.all<AgentRow>("SELECT a.* FROM agent_instances a JOIN sessions s ON s.id=a.session_id WHERE s.lifecycle!='ENDED' AND a.retired_at IS NULL")) {
           const frozen=profileOf(agent);
           ensure(providerScope(frozen)!==providerScope(p)||policy(frozen)===policy(p),422,'ACTIVE_PROVIDER_POLICY_CONFLICT');
         }
@@ -113,7 +115,7 @@ export class SessionService {
       const p=version===undefined?this.modelProfiles().find(x=>x.id===profileId):row?ModelProfileSchema.parse(JSON.parse(row.definition)):undefined;
       ensure(p,404,'PROFILE_NOT_FOUND');
       this.providers.requestProbe(p);
-      for(const a of this.store.all<AgentRow>('SELECT * FROM agent_instances')) if(this.session(a.session_id).lifecycle!=='ENDED'&&providerScope(profileOf(a))===providerScope(p)) {
+      for(const a of this.store.all<AgentRow>('SELECT * FROM agent_instances WHERE retired_at IS NULL')) if(this.session(a.session_id).lifecycle!=='ENDED'&&providerScope(profileOf(a))===providerScope(p)) {
         this.cancelRuns(a.session_id,'PROVIDER_RETRY',a.slot);
         this.store.run('UPDATE agent_instances SET error_count=0,retry_at=NULL,last_error=NULL WHERE id=?',a.id);
         this.wake(a.id,'RECOVERY'); this.trace(a.session_id,a.id,null,'PROVIDER_PROBE_REQUESTED');
@@ -125,6 +127,7 @@ export class SessionService {
     return this.receipt(`operator:${session}:agent-retry`,key,{agentId},()=>{
       const a=this.agent(agentId); ensure(a.session_id===session,403,'AGENT_SESSION_MISMATCH');
       ensure(this.session(session).lifecycle!=='ENDED',409,'SESSION_ENDED');
+      ensure(a.retired_at===null,409,'AGENT_RETIRED');
       this.cancelRuns(session,'AGENT_RETRY',a.slot);
       this.store.run("UPDATE agent_instances SET error_count=0,retry_at=NULL,last_error=NULL,state='listening' WHERE id=?",agentId);
       this.wake(agentId,'RECOVERY'); this.trace(session,agentId,null,'MANUAL_AGENT_RETRY'); return {ok:true};
@@ -178,7 +181,7 @@ export class SessionService {
     this.store.run("UPDATE sessions SET lifecycle='PAUSED',activity='BUDGET_PAUSED',stop_reason=?,epoch=epoch+1 WHERE id=?",reason,id);
     this.cancelRuns(id,'BUDGET_CANCELLED');
     this.store.run("UPDATE candidates SET state='NEEDS_REVIEW' WHERE session_id=? AND state='READY'",id);
-    this.store.run("UPDATE agent_instances SET state='paused' WHERE session_id=?",id);
+    this.store.run("UPDATE agent_instances SET state='paused' WHERE session_id=? AND retired_at IS NULL",id);
     this.emit(id,'budget.paused',{reason});
   }
   private timeExceeded(s: SessionRow): boolean { return this.activeElapsed(s)>=settingsOf(s).maxDurationMs; }
@@ -200,7 +203,7 @@ export class SessionService {
       }
       this.cancelRuns(id,'LIFECYCLE_CHANGED');
       this.store.run("UPDATE candidates SET state=? WHERE session_id=? AND state='READY'",action==='end'?'DROPPED':'NEEDS_REVIEW',id);
-      if(action==='end') this.agenda.endSession(id);
+      if(action==='end') { this.agenda.endSession(id); closeEpisode(this.store,id,this.now()); }
       if(action==='end') this.store.run("UPDATE candidates SET state='DROPPED',reason='ENDED' WHERE session_id=? AND state IN ('DRAFTING','NEEDS_REVIEW','DEFERRED')",id);
       for(const a of this.agents(id)) {
         this.store.run('UPDATE agent_instances SET state=?,next_self_at=? WHERE id=?',action==='end'?'ended':action==='pause'?'paused':'listening',this.selfWake(settingsOf(s)),a.id);
@@ -221,11 +224,34 @@ export class SessionService {
     this.receipt(`operator:${session}:membership`,key,{agentId,enabled},()=>{
       const s=this.session(session),a=this.agent(agentId);
       ensure(a.session_id===session,403,'AGENT_SESSION_MISMATCH'); ensure(s.lifecycle==='DRAFT'||s.lifecycle==='PAUSED',409,'PAUSE_REQUIRED');
+      ensure(a.retired_at===null,409,'AGENT_RETIRED');
       this.cancelRuns(session,'MEMBERSHIP_CHANGED');
       this.store.run('UPDATE sessions SET epoch=epoch+1 WHERE id=?',session);
       this.store.run('UPDATE agent_instances SET enabled=?,state=? WHERE id=?',enabled?1:0,enabled?'listening':'disabled',agentId);
       this.store.run("UPDATE candidates SET state='DROPPED',reason='MEMBERSHIP_CHANGED' WHERE agent_id=? AND state IN ('DRAFTING','READY','NEEDS_REVIEW','DEFERRED')",agentId);
       this.emit(session,'session.membership',{agentId,enabled}); return {ok:true};
+    });
+  }
+  membership(id: string) { return this.store.tx(()=>membershipReport(this,id)); }
+  episodes(id: string) { return this.store.tx(()=>sessionEpisodes(this.store,id)); }
+  updateMembership(id: string, input: unknown, key: string) {
+    const data=MembershipUpdateSchema.parse(input);
+    return this.receipt(`operator:${id}:participants`,key,data,()=>{
+      const changes=applyMembership(this,id,data,settings=>this.selfWake(settings));
+      if(changes.changed) {
+        this.cancelRuns(id,'MEMBERSHIP_RECONCILED');
+        this.store.run("UPDATE candidates SET state='DROPPED',reason='MEMBERSHIP_RECONCILED' WHERE session_id=? AND state IN ('DRAFTING','READY','NEEDS_REVIEW','DEFERRED')",id);
+        this.emit(id,'session.membership',changes); this.trace(id,null,null,'MEMBERSHIP_RECONCILED',changes);
+      }
+      return membershipReport(this,id);
+    });
+  }
+  cloneSession(id: string, input: unknown, key: string): {id:string;copy:'definitions-only'} {
+    const data=SessionCloneSchema.parse(input);
+    return this.receipt(`operator:${id}:clone`,key,data,()=>{
+      const result=cloneDefinitions(this,id,data.title,settings=>this.selfWake(settings));
+      this.emit(result.id,'session.created',{copiedFrom:id,copy:result.copy});
+      return result;
     });
   }
   recover(): void {
@@ -334,7 +360,7 @@ export class SessionService {
     ensure(this.config.workerTokens[slot],403,'WORKER_FORBIDDEN');
     return this.write(()=>{
       this.store.run('UPDATE workers SET epoch=epoch+1,last_seen_at=? WHERE slot=?',this.now(),slot);
-      for(const a of this.store.all<AgentRow>('SELECT * FROM agent_instances WHERE slot=?',slot)) {
+      for(const a of this.store.all<AgentRow>('SELECT * FROM agent_instances WHERE slot=? AND retired_at IS NULL',slot)) {
         this.cancelRuns(a.session_id,'WORKER_REPLACED',slot);
         if(this.session(a.session_id).lifecycle==='RUNNING') this.wake(a.id,'RECOVERY');
       }
@@ -664,7 +690,7 @@ export class SessionService {
     });
   }
   workerMemories(slot: string, agentId: string) {
-    const a=this.agent(agentId); ensure(a.slot===slot,403,'PRIVATE_STATE_FORBIDDEN');
+    const a=this.agent(agentId); ensure(a.slot===slot&&a.retired_at===null,403,'PRIVATE_STATE_FORBIDDEN');
     return this.store.all<MemoryRow>(`SELECT m.* FROM memories m WHERE m.agent_id=? AND ${currentMemoryPredicate()} ORDER BY m.created_at,m.rowid`,agentId)
       .map(m=>memoryNote(this.store,m));
   }
@@ -684,13 +710,13 @@ export class SessionService {
   publicAgent(a: AgentRow): PublicAgent {
     const c=characterOf(a),last=this.store.get<{last_seen_at:number|null}>('SELECT last_seen_at FROM workers WHERE slot=?',a.slot)?.last_seen_at??null;
     return {id:a.id,slot:a.slot,characterId:c.id,characterVersion:c.version,name:c.name,presentationRef:c.presentationRef,profileId:profileOf(a).id,enabled:!!a.enabled,status:a.state,
-      workerOnline:last!==null&&this.now()-last<=Math.max(15000,settingsOf(this.session(a.session_id)).leaseMs),lastSeenAt:last,nextRetryAt:a.retry_at};
+      workerOnline:a.retired_at===null&&last!==null&&this.now()-last<=Math.max(15000,settingsOf(this.session(a.session_id)).leaseMs),lastSeenAt:last,nextRetryAt:a.retry_at};
   }
   publicSession(s: SessionRow): PublicSession { return {id:s.id,title:s.title,lifecycle:s.lifecycle,activity:s.activity,revision:s.revision,epoch:s.epoch,createdAt:s.created_at,startedAt:s.started_at,stopReason:s.stop_reason,calls:s.call_count,botMessages:s.bot_count,
     budget:{callsUsed:s.call_count-s.window_call_start,messagesUsed:s.bot_count-s.window_post_start,activeMs:this.activeElapsed(s)},settings:settingsOf(s),mode:this.agents(s.id).some(a=>profileOf(a).provider!=='mock')?'live':'mock'}; }
   publicMessage(m: MessageRow): PublicMessage {
-    const a=m.author_id?this.agent(m.author_id):null,c=a?characterOf(a):null;
-    return {id:m.id,sessionId:m.session_id,sequence:m.sequence,threadRootId:m.thread_root,revision:m.revision,authorId:m.author_id,authorName:c?.name??'あなた',characterId:c?.id??null,characterVersion:c?.version??null,text:m.deleted?'':m.text,act:m.act,replyTo:m.reply_to,addressedTo:JSON.parse(m.addressed_json) as string[],deleted:!!m.deleted,episode:m.episode,createdAt:m.created_at};
+    const author=publishedAuthor(this.store,m);
+    return {id:m.id,sessionId:m.session_id,sequence:m.sequence,threadRootId:m.thread_root,revision:m.revision,authorId:m.author_id,...author,text:m.deleted?'':m.text,act:m.act,replyTo:m.reply_to,addressedTo:JSON.parse(m.addressed_json) as string[],deleted:!!m.deleted,episode:m.episode,createdAt:m.created_at};
   }
   listSessions(): PublicSession[] { return this.store.all<SessionRow>('SELECT * FROM sessions ORDER BY created_at DESC,rowid DESC').map(s=>this.publicSession(s)); }
   private cursor(session: string, n: number): string { return session+':'+n; }

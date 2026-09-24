@@ -16,6 +16,10 @@ export async function operatorCommand(args:string[],env:NodeJS.ProcessEnv=proces
     case 'create':path='/v1/sessions';method='POST';body=JSON.parse(readFileSync(id,'utf8'));break;
     case 'status':path=`/v1/sessions/${session()}/diagnostics`;break;
     case 'operations':path=`/v1/sessions/${session()}/operations`;break;
+    case 'members':path=`/v1/sessions/${session()}/membership`;break;
+    case 'episodes':path=`/v1/sessions/${session()}/episodes`;break;
+    case 'members-apply':path=`/v1/sessions/${session()}/membership`;method='POST';body=JSON.parse(readFileSync(arg,'utf8'));break;
+    case 'clone':path=`/v1/sessions/${session()}/clone`;method='POST';body=JSON.parse(readFileSync(arg,'utf8'));break;
     case 'export':path=`/v1/sessions/${session()}/export`;break;
     case 'start':case 'pause':case 'resume':case 'end':case 'budget':path=`/v1/sessions/${session()}/${action}`;method='POST';body={};break;
     case 'retry-agent':path=`/v1/sessions/${session()}/agents/${encodeURIComponent(Id.parse(arg))}/retry`;method='POST';body={};break;
@@ -26,7 +30,7 @@ export async function operatorCommand(args:string[],env:NodeJS.ProcessEnv=proces
     case 'say':path=`/v1/sessions/${session()}/messages`;method='POST';body={text:arg};break;
     case 'source':path=`/v1/sessions/${session()}/sources`;method='POST';body=JSON.parse(readFileSync(arg,'utf8'));break;
     case 'search':path=`/v1/sessions/${session()}/search?q=${encodeURIComponent(arg)}`;break;
-    default:throw new Error('Usage: list | create FILE | profiles | profile-versions PROFILE | profile-save FILE | operations/status/start/pause/resume/end/export/budget SESSION | retry-agent SESSION AGENT | retry-provider PROFILE VERSION | say/search SESSION TEXT | source SESSION FILE');
+    default:throw new Error('Usage: list | create FILE | profiles | profile-versions PROFILE | profile-save FILE | members/episodes/operations/status/start/pause/resume/end/export/budget SESSION | members-apply/clone SESSION FILE | retry-agent SESSION AGENT | retry-provider PROFILE VERSION | say/search SESSION TEXT | source SESSION FILE');
   }
   const response=await fetcher(new URL(path,base),{method,redirect:'error',headers:{authorization:'Bearer '+token,'content-type':'application/json','idempotency-key':env.IDEMPOTENCY_KEY??randomUUID()},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});
   return {ok:response.ok,body:await response.text()};

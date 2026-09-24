@@ -10,7 +10,7 @@ export type SessionRow = { id: string; title: string; lifecycle: 'DRAFT'|'RUNNIN
   created_at: number; started_at: number|null; last_activity_at: number; last_post_at: number;
   settings_json: string; call_count: number; bot_count: number; stop_reason: string|null; episode: number; active_elapsed_ms: number; active_since: number|null; window_call_start: number; window_post_start: number };
 export type AgentRow = { id: string; session_id: string; slot: string; character_json: string; profile_json: string;
-  enabled: number; processed_revision: number; dirty_revision: number; wake_seq: number; processed_wake: number;
+  enabled: number; retired_at: number|null; processed_revision: number; dirty_revision: number; wake_seq: number; processed_wake: number;
   pending_since: number|null; due_at: number|null; trigger: string; idle_checked: number; next_self_at: number;
   last_post_at: number; error_count: number; state: string; memory_revision: number; deferral_json: string|null; retry_at: number|null; last_error: string|null };
 export type CandidateRow = { id: string; agent_id: string; session_id: string; version: number; state: string;

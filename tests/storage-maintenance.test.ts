@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fixture } from './helpers.js';
+import { asV6Fixture } from './fixtures/session-v6.js';
 import { backupDatabase, inspectDatabase, maintainDatabase, restoreDatabase } from '../packages/storage-sqlite/maintenance.js';
 import { Store } from '../packages/storage-sqlite/index.js';
 import { CURRENT_SCHEMA_VERSION } from '../packages/storage-sqlite/schema-version.js';
@@ -97,6 +98,7 @@ it('R10-STORAGE-005: SQLite capacity failure rolls back the transaction and neve
 
 it('R10-STORAGE-006: a failed populated V2 migration leaves its committed schema and records intact for explicit repair',()=>{
   const f=setup();const original=f.say('移行失敗でも保持');
+  asV6Fixture(f.store.db);
   f.store.db.exec(`DROP TABLE memory_changes; DROP TABLE memory_edges; DROP TABLE memory_metadata;
     DROP TABLE agent_agenda_bindings; DROP TABLE agent_agenda_clock; DROP TABLE agent_agenda;
     DROP TRIGGER input_message_insert; DROP TRIGGER input_message_update; DROP TRIGGER input_source_insert;

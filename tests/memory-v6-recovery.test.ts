@@ -5,6 +5,8 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {fixture} from './helpers.js';
+import {asV6Fixture} from './fixtures/session-v6.js';
+import {CURRENT_SCHEMA_VERSION} from '../packages/storage-sqlite/schema-version.js';
 import {Store} from '../packages/storage-sqlite/index.js';
 import {SessionService} from '../packages/session-service/index.js';
 import {backupDatabase,restoreDatabase,inspectDatabase} from '../packages/storage-sqlite/maintenance.js';
@@ -24,8 +26,8 @@ it('R5-MIGRATION-040: populated V5 upgrades preserve originals, versions and cur
     const before=Object.fromEntries(retained.map(table=>[table,f.store.all('SELECT * FROM '+table+' ORDER BY rowid')]));
     const settings=f.service.session(f.id).settings_json;
     // Isolated synthetic V5 fixture only. This is never an operational downgrade procedure.
-    f.store.tx(()=>f.store.db.exec(removeV6));f.close();reopened=new Store(path);
-    expect(inspectDatabase(path).schemaVersion).toBe(6);
+    asV6Fixture(f.store.db);f.store.tx(()=>f.store.db.exec(removeV6));f.close();reopened=new Store(path);
+    expect(inspectDatabase(path).schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     for(const table of retained)expect(reopened.all('SELECT * FROM '+table+' ORDER BY rowid'),table).toEqual(before[table]);
     expect(reopened.get<{settings_json:string}>('SELECT settings_json FROM sessions WHERE id=?',f.id)!.settings_json).toBe(settings);
     expect(reopened.get<{state:string}>('SELECT state FROM runs WHERE id=?',active.id)!.state).toBe('CANCELLED');
@@ -40,7 +42,7 @@ it('R5-MIGRATION-041: failed V5-to-V6 migration rolls back newly created tables 
   const dir=mkdtempSync(join(tmpdir(),'memory-v6-failure-')),path=join(dir,'state.sqlite'),f=fixture(3,{},path);
   try{
     const source=f.say('移行失敗でも残す原文');
-    f.store.tx(()=>f.store.db.exec(removeV6+' CREATE TABLE memory_edges(sentinel TEXT); INSERT INTO memory_edges VALUES (\'preserve\');'));
+    asV6Fixture(f.store.db);f.store.tx(()=>f.store.db.exec(removeV6+' CREATE TABLE memory_edges(sentinel TEXT); INSERT INTO memory_edges VALUES (\'preserve\');'));
     f.close();expect(()=>new Store(path)).toThrow();
     const raw=new Database(path);
     try{
@@ -50,11 +52,11 @@ it('R5-MIGRATION-041: failed V5-to-V6 migration rolls back newly created tables 
       expect(raw.prepare("SELECT name FROM sqlite_master WHERE name IN ('memory_metadata','memory_changes')").all()).toEqual([]);
       raw.exec('DROP TABLE memory_edges;');
     }finally{raw.close();}
-    const recovered=new Store(path);try{expect(recovered.get('SELECT text FROM messages WHERE id=?',source.id)).toEqual({text:source.text});expect(inspectDatabase(path).schemaVersion).toBe(6);}finally{recovered.close();}
+    const recovered=new Store(path);try{expect(recovered.get('SELECT text FROM messages WHERE id=?',source.id)).toEqual({text:source.text});expect(inspectDatabase(path).schemaVersion).toBe(CURRENT_SCHEMA_VERSION);}finally{recovered.close();}
   }finally{if(f.store.db.open)f.close();rmSync(dir,{recursive:true,force:true});}
 });
 
-it('R5-MIGRATION-042: an online V6 snapshot restores populated status, dependency edges and audit history exactly',async()=>{
+it('R5-MIGRATION-042: an online current-schema snapshot restores populated V6 status, dependency edges and audit history exactly',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'memory-v6-backup-')),path=join(dir,'state.sqlite'),f=fixture(3,{},path);let restored:Store|undefined;
   try{
     const source=f.say('保存試験の合成根拠'),owner=f.service.agents(f.id)[0].id,ids=Array.from({length:4},()=>randomUUID());
@@ -72,7 +74,7 @@ it('R5-MIGRATION-042: an online V6 snapshot restores populated status, dependenc
     const tables=[...retained,'memory_metadata','memory_edges','memory_changes'];
     const before=Object.fromEntries(tables.map(table=>[table,f.store.all('SELECT * FROM '+table+' ORDER BY rowid')]));
     const backup=join(dir,'backup.sqlite'),destination=join(dir,'restored.sqlite');
-    expect((await backupDatabase(path,backup)).schemaVersion).toBe(6);expect((await restoreDatabase(backup,destination)).integrity).toBe('ok');
+    expect((await backupDatabase(path,backup)).schemaVersion).toBe(CURRENT_SCHEMA_VERSION);expect((await restoreDatabase(backup,destination)).integrity).toBe('ok');
     restored=new Store(destination);for(const table of tables)expect(restored.all('SELECT * FROM '+table+' ORDER BY rowid'),table).toEqual(before[table]);
     const service=new SessionService(restored,f.config,f.now);expect(service.workerMemories('worker-0',owner).map(m=>m.id)).toEqual([ids[0],ids[2]]);
   }finally{restored?.close();if(f.store.db.open)f.close();rmSync(dir,{recursive:true,force:true});}
