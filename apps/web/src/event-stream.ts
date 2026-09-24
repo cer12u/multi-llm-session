@@ -6,15 +6,17 @@ export function subscribeSession(load:()=>Promise<Snapshot>,publish:(snapshot:Sn
   options:{adapter?:PresentationAdapter;adapterTimeoutMs?:number;onEvent?:(event:PresentationEvent)=>void}={}):()=>void {
   let closed=false,source:EventSource|null=null,retry:ReturnType<typeof setTimeout>|null=null;
   let presentation:PresentationDispatcher|null=null;
-  let refreshTimer:ReturnType<typeof setTimeout>|null=null,fetching=false,dirty=false,backoff=1000,generation=0;
+  let refreshTimer:ReturnType<typeof setTimeout>|null=null,fetchingGeneration:number|null=null,dirty=false,backoff=1000,generation=0;
+  const resetConnection=()=>{generation++;source?.close();source=null;presentation?.dispose();presentation=null;};
   const reconnect=()=>{
-    if(closed||retry)return;generation++;source?.close();source=null;presentation?.dispose();presentation=null;status('再接続中');
+    if(closed||retry)return;resetConnection();status('再接続中');
     retry=setTimeout(()=>{retry=null;void connect();},backoff);backoff=Math.min(backoff*2,10000);
   };
   const refresh=async()=>{
-    dirty=true;if(fetching||closed)return;fetching=true;const expected=generation;
+    dirty=true;if(fetchingGeneration===generation||closed)return;const expected=generation;fetchingGeneration=expected;
     try{while(dirty&&!closed&&expected===generation){dirty=false;const snapshot=await load();if(!closed&&expected===generation)publish(snapshot);}}
-    catch{if(!closed&&expected===generation)reconnect();}finally{fetching=false;}
+    catch{if(!closed&&expected===generation)reconnect();}
+    finally{if(fetchingGeneration===expected)fetchingGeneration=null;}
   };
   const requestRefresh=()=>{
     if(closed)return;dirty=true;
@@ -38,18 +40,10 @@ export function subscribeSession(load:()=>Promise<Snapshot>,publish:(snapshot:Sn
     }catch{if(!closed&&expected===generation)reconnect();}
   };
   const offline=()=>reconnect();
-  const online=()=>{
-    if(closed)return;
-    // A positive browser connectivity event should not wait for an old, increasing offline retry delay.
-    generation++;if(retry)clearTimeout(retry);retry=null;
-    if(refreshTimer)clearTimeout(refreshTimer);refreshTimer=null;
-    source?.close();source=null;presentation?.dispose();presentation=null;backoff=1000;
-    status('再接続中');void connect();
-  };
+  // Recovery of connectivity is new evidence: do not keep a previous offline backoff.
+  // Fence old pending requests before acquiring a fresh authoritative snapshot.
+  const online=()=>{if(closed)return;if(retry)clearTimeout(retry);retry=null;backoff=1000;resetConnection();status('再接続中');void connect();};
   if(typeof window!=='undefined'){window.addEventListener('offline',offline);window.addEventListener('online',online);}
   void connect();
-  return()=>{
-    if(typeof window!=='undefined'){window.removeEventListener('offline',offline);window.removeEventListener('online',online);}
-    closed=true;generation++;source?.close();presentation?.dispose();if(retry)clearTimeout(retry);if(refreshTimer)clearTimeout(refreshTimer);
-  };
+  return()=>{if(typeof window!=='undefined'){window.removeEventListener('offline',offline);window.removeEventListener('online',online);}closed=true;resetConnection();if(retry)clearTimeout(retry);if(refreshTimer)clearTimeout(refreshTimer);};
 }
