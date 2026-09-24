@@ -54,7 +54,8 @@ it('R6-FLOW-003: only the owner receives its published purpose beyond the recent
     const peer = foreground(f, 'worker-1'); expect(JSON.stringify(peer.context)).not.toContain(intent.intent);
     expect(JSON.stringify(f.service.exportSession(f.id))).not.toContain(intent.intent);
     f.finish(owner, { decision: 'ABSTAIN', reason: 'owner keeps listening' }); f.finish(peer, { decision: 'ABSTAIN', reason: 'peer keeps listening' });
-    f.service.changeMessage(f.id, original.id, '編集された公開発言', randomUUID());
+    expect(() => f.service.changeMessage(f.id, original.id, '編集された公開発言', randomUUID())).toThrow('BOT_TEXT_IMMUTABLE');
+    f.service.changeMessage(f.id, original.id, null, randomUUID());
     const next = foreground(f); expect(next.context.conversation!.recentPurposes.some(p => p.messageId === original.id)).toBe(false);
     f.finish(next, { decision: 'ABSTAIN', reason: 'old purpose not asserted for edited message' });
   } finally { f.close(); }
