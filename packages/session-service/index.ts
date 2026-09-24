@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { SessionSources } from './sources.js';
+import { currentSources, lookupSource } from './source-access.js';
 import { MembershipUpdateSchema, SessionCloneSchema } from '../contracts/session-membership.js';
 import { applyMembership, cloneDefinitions, closeEpisode, episodes as sessionEpisodes, membershipReport, publishedAuthor } from './membership.js';
 import { AgentAgenda } from './agenda.js';
@@ -30,6 +32,7 @@ const activeCandidateSQL = "SELECT * FROM candidates WHERE agent_id=? AND state 
 /** Only this service writes conversation state. No asynchronous work occurs inside its transactions. */
 export class SessionService {
   readonly changes = new EventEmitter();
+  readonly sources: SessionSources;
   readonly pages: ArchivePages;
   readonly providers: ProviderState;
   private readonly privateStates: PrivateStates;
@@ -44,6 +47,12 @@ export class SessionService {
     this.inputs = new AgentInputs(store, now, row => this.publicMessage(row));
     this.agenda = new AgentAgenda(store, now);
     this.memoryLedger = new MemoryLedger(store, now);
+    this.sources = new SessionSources({store,config,now,session:id=>this.session(id),agents:id=>this.agents(id),
+      write:fn=>this.write(fn),receipt:(scope,key,input,fn)=>this.receipt(scope,key,input,fn),
+      cancel:(session,reason,slot)=>this.cancelRuns(session,reason,slot),wake:(agent,reason)=>this.wake(agent,reason),
+      emit:(session,kind,data)=>this.emit(session,kind,data),trace:(session,agent,run,code,detail)=>this.trace(session,agent,run,code,detail),
+      invalidate:(session,id)=>{this.privateStates.invalidateSource(session,id);
+        for(const agent of this.agents(session))this.agenda.sync(agent,this.privateStates.read(agent.id,session),settingsOf(this.session(session)),this.inputs.high(session,agent.id));}});
     this.changes.setMaxListeners(100);
     store.tx(() => {
       for (const slot of Object.keys(config.workerTokens)) store.run('INSERT OR IGNORE INTO workers(slot) VALUES(?)', slot);
@@ -344,17 +353,8 @@ export class SessionService {
       return this.publicMessage(this.store.get<MessageRow>('SELECT * FROM messages WHERE id=?',messageId)!);
     });
   }
-  injectSource(session: string, input: unknown, externalId: string, source='manual'): {id:string} {
-    const data=SourceSchema.parse(input);
-    return this.receipt(`operator:${session}:source:${source}`,externalId,data,()=>{
-      ensure(this.session(session).lifecycle!=='ENDED',409,'SESSION_ENDED');
-      const old=this.store.get<{id:string}>('SELECT id FROM source_items WHERE session_id=? AND source=? AND external_id=?',session,source,externalId);
-      if(old) return old;
-      const id=randomUUID();
-      this.store.run('INSERT INTO source_items(id,session_id,source,external_id,title,text,url,published_at,fetched_at) VALUES(?,?,?,?,?,?,?,?,?)',id,session,source,externalId,data.title,data.text,data.url,data.publishedAt,this.now());
-      for(const a of this.agents(session)) this.wake(a.id,'SOURCE_AVAILABLE');
-      this.emit(session,'source.available',{sourceId:id,title:data.title}); return {id};
-    });
+  injectSource(session: string, input: unknown, externalId: string, source='manual'): {id:string;version:number} {
+    return this.sources.inject(session,input,externalId,source);
   }
   registerWorker(slot: string): {epoch:number} {
     ensure(this.config.workerTokens[slot],403,'WORKER_FORBIDDEN');
@@ -388,9 +388,7 @@ export class SessionService {
     const messages=rows.map(m=>this.publicMessage(m));
     const memories=this.pages.memories(agent.id,'',{limit:12}).items.reverse();
     const questions=questionHints(this.store,agent,this.privateStates.read(agent.id,s.id));
-    const sources=this.store.all<{id:string;title:string;text:string;url:string|null;published_at:string|null;fetched_at:number}>(
-      'SELECT * FROM source_items WHERE session_id=? ORDER BY fetched_at DESC,rowid DESC LIMIT 4',s.id)
-      .map(x=>({id:x.id,title:x.title,text:x.text.slice(0,1600),url:x.url,publishedAt:x.published_at,fetchedAt:x.fetched_at}));
+    const sources=currentSources(this.store,s.id,agent.id);
     const changed=candidate?this.store.all<MessageRow>('SELECT * FROM messages WHERE session_id=? AND revision>? ORDER BY revision LIMIT 101',s.id,candidate.reviewed_revision):[];
     const delta:PublicMessage[]=[]; let size=0;
     for(const row of changed) {
@@ -493,10 +491,13 @@ export class SessionService {
   }
   retrieve(slot:string,epoch:number,id:string,token:string,key:string,requests:LookupRequest[]):Context {
     const parsed=LookupSchema.parse({decision:'LOOKUP',requests});
+    this.validRun(slot,epoch,id,token); // Cached LOOKUP results never outlive the authorized active run.
     return this.receipt(`worker:${slot}:${id}:lookup`,key,parsed,()=>{
       const r=this.validRun(slot,epoch,id,token); ensure(r.retrieval_count<2&&r.kind!=='memory',409,'LOOKUP_LIMIT');
       ensure(this.store.get('SELECT id FROM llm_calls WHERE run_id=? AND status=\'FINISHED\' AND error_code IS NULL',id),409,'MODEL_CALL_NOT_RECORDED');
       const results:RetrievalResult[]=parsed.requests.map(request=>{
+        if(request.kind==='source') {const source=lookupSource(this.store,r.session_id,r.agent_id,request.query,request.cursor);
+          return {request,messages:[],memories:[],sources:[source],nextCursor:source.nextCursor};}
         if(request.kind==='message') return {request,messages:[this.archiveMessage(r.session_id,request.query)],memories:[],nextCursor:null};
         if(request.kind==='memories') {
           const page=this.pages.memories(r.agent_id,request.query,{limit:2,cursor:request.cursor});
@@ -509,6 +510,8 @@ export class SessionService {
       let context=JSON.parse(r.context_json) as Context;
       ensure(context.self.privateState?.version===this.privateStates.read(r.agent_id,r.session_id).version,409,'STALE_PRIVATE_STATE');
       context.retrieved=[...(context.retrieved??[]),...results];
+      for(const source of results.flatMap(result=>result.sources??[]))
+        if(!context.sources.some(old=>old.id===source.id&&old.version===source.version&&old.offset===source.offset))context.sources.push(source);
       ensure(JSON.stringify(context.retrieved).length<=settingsOf(this.session(r.session_id)).contextChars,422,'LOOKUP_CONTEXT_LIMIT');
       const owner=this.agent(r.agent_id);
       context=this.privateStates.prepare(owner,boundedContext(context,r.kind,profileOf(owner),settingsOf(this.session(r.session_id))));
@@ -535,7 +538,7 @@ export class SessionService {
       const c=r.candidate_id?this.store.get<CandidateRow>('SELECT * FROM candidates WHERE id=?',r.candidate_id):undefined;
       if(r.candidate_id) ensure(c&&c.version===r.candidate_version&&c.agent_id===r.agent_id&&!['COMMITTED','DROPPED'].includes(c.state),409,'STALE_CANDIDATE');
       const delivery=(JSON.parse(r.context_json) as Context).delivery!;
-      const ready=r.snapshot_revision===s.revision&&r.wake_seq===a.wake_seq&&delivery.complete&&delivery.targetInput===this.inputs.high(s.id);
+      const ready=r.snapshot_revision===s.revision&&r.wake_seq===a.wake_seq&&delivery.complete&&delivery.targetInput===Math.max(delivery.fromInput,this.inputs.high(s.id,a.id));
       const notBefore=Math.max(this.now()+st.arbitrationMs+Math.floor(this.random()*Math.min(500,st.arbitrationMs)),a.last_post_at+st.agentCooldownMs);
       if(r.kind==='observe') {
         ObserveSchema.parse(action);this.trace(s.id,a.id,id,'OBSERVED_WITHOUT_PUBLICATION');
@@ -657,7 +660,7 @@ export class SessionService {
         for(let a of this.agents(s.id)) {
           if(!a.enabled) continue;
           const st=settingsOf(s);
-          this.agenda.sync(a,this.privateStates.read(a.id,s.id),st,this.inputs.high(s.id));
+          this.agenda.sync(a,this.privateStates.read(a.id,s.id),st,this.inputs.high(s.id,a.id));
           if(s.call_count-s.window_call_start<st.maxCalls&&s.bot_count-s.window_post_start<st.maxMessages&&
             this.providers.mayClaim(profileOf(a),a.error_count,st.maxRetries)&&
             (a.retry_at===null||a.retry_at<=this.now())&&this.agenda.dispatch(a,st)) {
