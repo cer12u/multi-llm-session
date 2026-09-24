@@ -11,6 +11,8 @@ import { ProviderCapabilitiesSchema } from './provider-capabilities.js';
 export * from './provider-capabilities.js';
 import type { QuestionHint } from './conversation.js';
 export * from './conversation.js';
+import type { ConversationFlow } from './participation.js';
+export * from './participation.js';
 
 export const Id = z.string().uuid();
 export const Slug = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/);
@@ -150,6 +152,7 @@ export type Context = {
   self: { id: string; character: Character; profileHash?: string; privateState?: PrivateState }; observation?: ObservationManifest; participants: PublicAgent[]; revision: number; trigger: string;
   messages: PublicMessage[]; delta: PublicMessage[]; historyTruncated: boolean;
   agenda?: AgendaContext;
+  conversation?: ConversationFlow;
   delivery?: InputWindow; progress?: InputProgress; selection?: InputSelection;
   recall?: { algorithm: 'local-word-evidence-v1' | 'owner-meaning-v2'; selected: {id:string;score:number;provenance:string}[]; omittedForBudget: string[]; elapsedMs?:number; candidates?:number; additionalCalls?:number };
   inputBudget?: {method:'utf8-upper-bound';maxTokens:number;reservedOutputTokens:number;estimatedInputTokens:number;tokenizer:'unknown'};

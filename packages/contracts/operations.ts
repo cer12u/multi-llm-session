@@ -15,6 +15,7 @@ export const operationLabels = {
   THINKING:'参加を判断中',GENERATING:'発言候補を生成中',REVIEWING:'発言候補を再確認中',
   REMEMBERING:'記憶を整理中',OBSERVING:'発言せず入力を観測中',WAITING_CANDIDATE:'発言候補の確定待ち',
   WAITING_REPLY:'指名した相手の返答待ち',DEFERRED:'本人が発言を保留',COOLDOWN:'発言後の待機',
+  CONTENT_LOOP:'本人が反復を避けて保留・沈黙中',
   WAITING_INPUT:'新着入力の処理待ち',QUIET:'本人は静かに待機中',
 } as const;
 export type OperationReason = keyof typeof operationLabels;
