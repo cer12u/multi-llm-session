@@ -10,6 +10,7 @@ const versionTables:Record<number,string[]>={
   4:['agent_input_log','agent_input_cursors','agent_input_receipts','memory_input_origins','candidate_state_bindings'],
   5:['agent_agenda','agent_agenda_bindings','agent_agenda_clock'],
   6:['memory_metadata','memory_edges','memory_changes'],
+  7:['session_member_changes','message_author_snapshots','session_episodes'],
 };
 export type StorageReport={schemaVersion:number;sqliteVersion:string;integrity:'ok';foreignKeyViolations:0;
   pageBytes:number;freeBytes:number;fileBytes:number;walBytes:number;rows:Record<string,number>};
@@ -26,6 +27,12 @@ function check(db:Database.Database):number {
   const tables=new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {name:string}[]).map(r=>r.name));
   const required=[...coreTables,...Object.entries(versionTables).filter(([v])=>Number(v)<=version).flatMap(([,names])=>names)];
   if(required.some(name=>!tables.has(name)))throw new Error('STORAGE_SCHEMA_INCOMPLETE');
+  if(version>=7){
+    const columns=db.prepare('PRAGMA table_info(agent_instances)').all() as {name:string}[];
+    const objects=new Set((db.prepare("SELECT name FROM sqlite_master WHERE type IN ('index','trigger')").all() as {name:string}[]).map(x=>x.name));
+    if(!columns.some(c=>c.name==='retired_at')||['current_session_worker','message_author_insert','session_episode_create','session_episode_message'].some(name=>!objects.has(name)))throw new Error('STORAGE_SCHEMA_INCOMPLETE');
+    if(db.prepare('SELECT m.id FROM messages m LEFT JOIN message_author_snapshots a ON a.message_id=m.id WHERE m.author_id IS NOT NULL AND (a.message_id IS NULL OR a.author_id<>m.author_id) LIMIT 1').get())throw new Error('STORAGE_AUTHOR_SNAPSHOT_INCOMPLETE');
+  }
   const integrity=db.pragma('integrity_check') as {integrity_check:string}[];
   if(integrity.length!==1||integrity[0].integrity_check!=='ok')throw new Error('STORAGE_INTEGRITY_FAILED');
   const violations=db.pragma('foreign_key_check');
