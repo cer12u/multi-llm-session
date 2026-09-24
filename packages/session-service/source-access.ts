@@ -1,4 +1,4 @@
-import { ensure, type Context } from '../contracts/index.js';
+import { AppError, ensure, type Context } from '../contracts/index.js';
 import type { SourceChunk } from '../contracts/source.js';
 import type { Store } from '../storage-sqlite/index.js';
 
@@ -7,7 +7,10 @@ export type SourceRow = {id:string;session_id:string;source:string;external_id:s
 /** Only fixed, internal aliases are passed. Values remain SQL parameters. */
 export const visibleInputSQL = (alias='i') => `(${alias}.kind='message' OR EXISTS(SELECT 1 FROM source_items s
   WHERE s.id=${alias}.entity_id AND s.session_id=${alias}.session_id AND s.enabled=1
-  AND (s.audience_json='null' OR EXISTS(SELECT 1 FROM json_each(s.audience_json) WHERE value=?))))`;
+  AND EXISTS(SELECT 1 FROM (SELECT ? AS owner) access
+    WHERE (s.audience_json='null' OR EXISTS(SELECT 1 FROM json_each(s.audience_json) WHERE value=access.owner))
+    AND EXISTS(SELECT 1 FROM source_versions v WHERE v.source_id=s.id AND v.version=${alias}.version AND v.enabled=1
+      AND (v.audience_json='null' OR EXISTS(SELECT 1 FROM json_each(v.audience_json) WHERE value=access.owner))))))`;
 export function sourceAllowed(row:SourceRow,agentId:string):boolean {
   return !!row.enabled && (row.audience_json==='null' || (JSON.parse(row.audience_json) as string[]).includes(agentId));
 }
@@ -19,11 +22,16 @@ export function ownerSource(store:Store,sessionId:string,agentId:string,id:strin
 }
 export function inputHigh(store:Store,sessionId:string,agentId?:string):number {
   const suffix=agentId?` AND ${visibleInputSQL()}`:'';
-  return store.get<{n:number}>(`SELECT COALESCE(MAX(i.id),0) n FROM agent_input_log i WHERE i.session_id=?${suffix}`,
+  const high=store.get<{n:number}>(`SELECT COALESCE(MAX(i.id),0) n FROM agent_input_log i WHERE i.session_id=?${suffix}`,
     ...agentId?[sessionId,agentId]:[sessionId])!.n;
+  if(!agentId)return high;
+  const cursor=store.get<{observed_input:number;memory_input:number}>('SELECT observed_input,memory_input FROM agent_input_cursors WHERE agent_id=?',agentId);
+  return Math.max(high,cursor?.observed_input??0,cursor?.memory_input??0);
 }
 export function sourceChunk(row:SourceRow,agentId:string,offset=0):SourceChunk {
-  const through=Math.min(row.text.length,offset+1600);
+  let through=Math.min(row.text.length,offset+1600);
+  ensure(offset===0||!/[\uDC00-\uDFFF]/.test(row.text.charAt(offset)),409,'SOURCE_RESYNC_REQUIRED');
+  if(through<row.text.length&&/[\uD800-\uDBFF]/.test(row.text.charAt(through-1)))through--;
   return {id:row.id,title:row.title,text:row.text.slice(offset,through),url:row.url,publishedAt:row.published_at,
     fetchedAt:row.fetched_at,version:row.version,offset,totalChars:row.text.length,
     nextCursor:through<row.text.length?Buffer.from(JSON.stringify({id:row.id,version:row.version,agentId,offset:through})).toString('base64url'):null};
@@ -32,7 +40,7 @@ export function lookupSource(store:Store,sessionId:string,agentId:string,id:stri
   const row=ownerSource(store,sessionId,agentId,id);let offset=0;
   if(cursor){
     let value:{id?:string;version?:number;agentId?:string;offset?:number};
-    try{value=JSON.parse(Buffer.from(cursor,'base64url').toString('utf8'));}catch{throw new Error('INVALID_SOURCE_CURSOR');}
+    try{value=JSON.parse(Buffer.from(cursor,'base64url').toString('utf8'));}catch{throw new AppError(422,'INVALID_SOURCE_CURSOR');}
     ensure(value && value.id===id && value.agentId===agentId && value.version===row.version &&
       Number.isSafeInteger(value.offset) && value.offset!>=0 && value.offset!<row.text.length,409,'SOURCE_RESYNC_REQUIRED');offset=value.offset!;
   }
