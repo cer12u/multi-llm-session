@@ -1,0 +1,47 @@
+name: Multi-provider deployment acceptance
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: deployment-ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  multi-provider-compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      detail: ${{ steps.build.outputs.diagnostic || steps.proof.outputs.detail }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - run: npm ci
+      - id: build
+        run: node deploy/ci-check.mjs build
+      - run: docker build -f deploy/Dockerfile -t multi-llm-session:ci .
+      - name: Non-root shared-model and heterogeneous HTTP Provider clusters
+        id: proof
+        run: node deploy/ci-deployment-check.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: synthetic-deployment-${{ github.run_id }}
+          path: artifacts/multiprovider-compose.json
+          retention-days: 7
+          if-no-files-found: warn
+  deployment-detail:
+    needs: multi-provider-compose
+    if: always()
+    name: "Deployment diagnostic only — ${{ needs.multi-provider-compose.outputs.detail || 'Inspect deployment job' }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: echo 'This job only displays bounded synthetic diagnostics. The multi-provider-compose job is authoritative.'

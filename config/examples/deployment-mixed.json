@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "allowLive": true,
+  "profiles": [
+    {"id":"native","version":1,"provider":"ollama","model":"REPLACE_MODEL_A","baseUrl":"https://ollama.example/api","apiKeyEnv":"MODEL_A_KEY","jsonMode":"json"},
+    {"id":"compatible-b","version":1,"provider":"openai","model":"REPLACE_MODEL_B","baseUrl":"https://provider-b.example/v1","apiKeyEnv":"MODEL_B_KEY","jsonMode":"schema"},
+    {"id":"compatible-c","version":1,"provider":"openai","model":"REPLACE_MODEL_C","baseUrl":"https://provider-c.example/v1","apiKeyEnv":"MODEL_C_KEY","jsonMode":"none"}
+  ],
+  "workers": [{"id":"worker-a","characterId":"sora","profileId":"native"},{"id":"worker-b","characterId":"nagi","profileId":"compatible-b"},{"id":"worker-c","characterId":"rin","profileId":"compatible-c"}],
+  "credentialFiles": {"MODEL_A_KEY":"/absolute/private/path/a.key","MODEL_B_KEY":"/absolute/private/path/b.key","MODEL_C_KEY":"/absolute/private/path/c.key"}
+}
