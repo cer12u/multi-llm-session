@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { QuestionAssessmentSchema } from './conversation.js';
 
 const EntityId = z.string().uuid();
 const EntryId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/);
@@ -24,6 +25,7 @@ export const PrivateStateEntrySchema = z.object({
   text: z.string().trim().min(1).max(500),
   evidence: z.array(EvidenceRefSchema).max(8),
   derivedFrom: z.array(EntityId).max(8).optional(),
+  question: QuestionAssessmentSchema.optional(),
   resume: ResumeConditionSchema.nullable(),
 }).strict();
 export type PrivateStateEntry = z.infer<typeof PrivateStateEntrySchema>;

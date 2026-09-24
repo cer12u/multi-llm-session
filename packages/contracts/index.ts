@@ -9,6 +9,8 @@ import { MemoryChangeSchema, type MemoryProvenance } from './memory.js';
 export * from './memory.js';
 import { ProviderCapabilitiesSchema } from './provider-capabilities.js';
 export * from './provider-capabilities.js';
+import type { QuestionHint } from './conversation.js';
+export * from './conversation.js';
 
 export const Id = z.string().uuid();
 export const Slug = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/);
@@ -72,10 +74,11 @@ export const SessionCreateSchema = z.object({
   settings: SettingsSchema.default(() => SettingsSchema.parse({})),
 }).strict().refine(v => new Set(v.participants.map(p => p.slot)).size === v.participants.length, 'Use distinct worker slots');
 export type SessionCreate = z.infer<typeof SessionCreateSchema>;
+export const ActSchema = z.enum(['answer', 'question', 'comment', 'agreement', 'joke', 'correction', 'topic']);
 export const MessageInputSchema = z.object({
   text: Text, replyTo: Id.nullable().default(null), addressedTo: z.array(Id).max(16).default([]),
+  act: ActSchema.optional(),
 }).strict();
-export const ActSchema = z.enum(['answer', 'question', 'comment', 'agreement', 'joke', 'correction', 'topic']);
 export const IntentSchema = z.object({
   act: ActSchema, intent: z.string().trim().min(1).max(500),
   replyTo: Id.nullable(), addressedTo: z.array(Id).max(16),
@@ -153,7 +156,7 @@ export type Context = {
   coverage?: { fromRevision: number; throughRevision: number; targetRevision: number; complete: boolean };
   retrieved?: RetrievalResult[];
   memories: MemoryNote[];
-  questions: { messageId: string; text: string; from: string | null }[];
+  questions: QuestionHint[];
   sources: { id: string; title: string; text: string; url: string | null; publishedAt: string | null; fetchedAt: number }[];
   candidate: { id: string; version: number; intent: Intent; text: string | null; reviewedRevision: number } | null;
 };
@@ -176,7 +179,7 @@ export const LookupRequestSchema = z.object({
   cursor: z.string().max(2048).nullable().default(null),
 }).strict();
 export const LookupSchema = z.object({ decision: z.literal('LOOKUP'), requests: z.array(LookupRequestSchema).min(1).max(3) }).strict();
-export type LookupRequest = z.infer<typeof LookupRequestSchema>;
+export type LookupRequest = z.infer<typeof LookupSchema>['requests'][number];
 export const WireOutputSchemas = {
   observe: z.union([OutputSchemas.observe, LookupSchema]),
   decide: z.union([OutputSchemas.decide, LookupSchema]), draft: z.union([OutputSchemas.draft, LookupSchema]),
