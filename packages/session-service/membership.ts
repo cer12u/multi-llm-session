@@ -84,6 +84,9 @@ export function applyMembership(service:SessionService,id:string,input:Membershi
   const epoch=s.epoch+1;service.store.run('UPDATE sessions SET epoch=?,revision=revision+1 WHERE id=?',epoch,id);
   for(const old of removed){
     service.store.run("UPDATE agent_instances SET enabled=0,retired_at=?,state='retired' WHERE id=?",service.now(),old.id);
+    // A retired owner can no longer replay a cached private LOOKUP response through its reused Worker slot.
+    // Only response caches are revoked; exact bound run contexts, state journals and memories remain private audit records.
+    service.store.run("DELETE FROM command_receipts WHERE scope IN (SELECT 'worker:'||slot||':'||id||':lookup' FROM runs WHERE agent_id=?)",old.id);
     journal(service,id,old.id,'RETIRE',epoch,snapshot(old),{...snapshot(old),enabled:false,retiredAt:service.now()});
   }
   for(const p of changed){
