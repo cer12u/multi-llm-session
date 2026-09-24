@@ -12,6 +12,15 @@ function preview(input:Context):Context {
     sources:unique(context.sources.map(s=>({kind:'source' as const,id:s.id,version:s.fetchedAt})))};
   return context;
 }
+/** Selection headroom only; the final request still uses the original authorized limits.
+ * Oversized lookups fail explicitly rather than deleting acknowledged observations.
+ */
+export function lookupSelectionSettings(profile:ModelProfile,settings:Settings):Settings {
+  const tokens=Math.min(settings.contextTokens??65536,profile.contextWindowTokens??Infinity);
+  return {...settings,
+    contextChars:settings.contextChars-Math.min(4096,Math.floor(settings.contextChars/5)),
+    contextTokens:tokens-Math.min(8192,Math.floor(tokens/8))};
+}
 /** Includes persona, state, all evidence, output schema (also response_format), framing, one worst-case repair and reserved output. */
 export function boundedContext(input:Context,kind:RunKind,profile:ModelProfile,settings:Settings):Context {
   const context=preview(input),maxTokens=Math.min(settings.contextTokens??65536,profile.contextWindowTokens??Infinity);
