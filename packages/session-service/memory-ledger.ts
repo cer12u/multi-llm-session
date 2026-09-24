@@ -112,7 +112,12 @@ export class MemoryLedger {
         ensure(source.author_id===meaning.subjectId,422,'MEMORY_NOT_SUBJECT_REPORT');
       }
       const explicit=this.observed(run,change.targets),parents=this.observed(run,change.parents);
-      for(const target of explicit){const meta=memoryNote(this.store,target).provenance?.meaning;ensure(meta&&sameMeaning(meta,meaning),422,'MEMORY_TARGET_MEANING_MISMATCH');}
+      for(const target of explicit){
+        const meta=memoryNote(this.store,target).provenance?.meaning;
+        ensure(meta&&sameMeaning(meta,meaning),422,'MEMORY_TARGET_MEANING_MISMATCH');
+        ensure(overlaps(meta,meaning),422,'MEMORY_TARGET_TIME_MISMATCH');
+        if(change.operation==='merge')ensure(meta.epistemic===meaning.epistemic&&meta.validFrom===meaning.validFrom&&meta.validTo===meaning.validTo,422,'MEMORY_MERGE_ATTRIBUTION_MISMATCH');
+      }
       const active=this.store.all<MemoryRow>(`SELECT m.* FROM memories m WHERE m.agent_id=? AND ${currentMemoryPredicate()}`,run.agent_id);
       const matching=active.filter(row=>{const old=memoryNote(this.store,row).provenance?.meaning;return !!old&&sameMeaning(old,meaning)&&overlaps(old,meaning);});
       const equivalent=matching.filter(row=>{const old=memoryNote(this.store,row).provenance!.meaning!;return normalizeMemory(old.value)===normalizeMemory(meaning.value)&&old.epistemic===meaning.epistemic&&old.validFrom===meaning.validFrom&&old.validTo===meaning.validTo;});
@@ -122,7 +127,8 @@ export class MemoryLedger {
       if(change.operation==='merge')ensure(replace.every(row=>normalizeMemory(memoryNote(this.store,row).provenance!.meaning!.value)===normalizeMemory(meaning.value)),422,'MEMORY_MERGE_VALUE_MISMATCH');
       const correction=change.operation==='correct'&&meaning.epistemic==='self_report'&&explicit.every(row=>change.sourceMessageIds.some(id=>!JSON.parse(row.sources_json).includes(id)));
       const conflicts=matching.filter(row=>!equivalent.some(x=>x.id===row.id)&&!(correction&&explicit.some(x=>x.id===row.id)));
-      const state:MemoryStatus=change.operation==='conflict'||(change.operation==='correct'&&!correction)||conflicts.length>0?'CONFLICT':'ACTIVE';
+      const uncertainParent=parents.some(row=>memoryNote(this.store,row).provenance?.status==='CONFLICT');
+      const state:MemoryStatus=uncertainParent||change.operation==='conflict'||(change.operation==='correct'&&!correction)||conflicts.length>0?'CONFLICT':'ACTIVE';
       const merge=change.operation==='merge'||equivalent.length>0;
       const sourceParents=merge?[...parents,...equivalent,...(change.operation==='merge'?explicit:[])]:parents;
       for(const parent of sourceParents){
