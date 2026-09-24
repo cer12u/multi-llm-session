@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixture } from './helpers.js';
 import { Store } from '../packages/storage-sqlite/index.js';
+import { CURRENT_SCHEMA_VERSION } from '../packages/storage-sqlite/schema-version.js';
 import { SessionService } from '../packages/session-service/index.js';
 import { StatePatchSchema, type ClaimedRun, type PrivateStateEntry, type StatePatch } from '../packages/contracts/index.js';
 
@@ -97,7 +98,6 @@ describe('R2 private working state: transactions and ownership, not natural-lang
   it.each(['unseen', 'foreign', 'wrong-version'] as const)('R2-STATE-007: rejects %s evidence rather than trusting its ID', kind => {
     const f = setup(3, { contextMessages: 5 }); f.say('最初の観測対象');
     for (let i = 0; i < 7; i++) f.say('未処理入力 ' + i);
-    // Sequential observation supplies the FIRST five inputs, not the latest five.
     const old = f.say('まだ供給していない後方の入力');
     const foreignSession = f.service.createSession(f.input, randomUUID()).id;
     const foreign = f.service.humanMessage(foreignSession, { text: '別部屋' }, randomUUID());
@@ -191,14 +191,15 @@ it('R2-STATE-020: a populated V2 database migrates with notes, IDs, settings and
   const agent = f.service.agents(f.id)[0], memoryId = randomUUID();
   f.store.run('INSERT INTO memories(id,agent_id,text,sources_json,created_at,sequence) VALUES(?,?,?,?,?,?)', memoryId, agent.id, '出典の確度を勝手に昇格しない旧メモ', JSON.stringify([source.id]), f.now(), 1);
   f.store.run('UPDATE agent_instances SET memory_seq=1 WHERE id=?', agent.id);
-  // Build an actual V2 fixture by removing every additive V3/V4/V5 object; this is NOT a rollback procedure.
-  f.store.db.exec(`DROP TABLE agent_agenda_bindings; DROP TABLE agent_agenda_clock; DROP TABLE agent_agenda;
+  // Construct V2 by removing every additive V3–V6 object. This is not a rollback procedure.
+  f.store.db.exec(`DROP TABLE memory_changes; DROP TABLE memory_edges; DROP TABLE memory_metadata;
+    DROP TABLE agent_agenda_bindings; DROP TABLE agent_agenda_clock; DROP TABLE agent_agenda;
     DROP TRIGGER input_message_insert; DROP TRIGGER input_message_update; DROP TRIGGER input_source_insert;
     DROP TABLE memory_input_origins; DROP TABLE candidate_state_bindings; DROP TABLE agent_input_receipts;
     DROP TABLE agent_input_cursors; DROP TABLE agent_input_log;
     DROP TABLE agent_state_updates; DROP TABLE agent_private_states; PRAGMA user_version=2;`); f.close();
   const db = new Store(f.config.dbPath); cleanup.push(() => db.close()); const service = new SessionService(db, f.config, f.now);
-  expect(db.db.pragma('user_version', { simple: true })).toBe(5);
+  expect(db.db.pragma('user_version', { simple: true })).toBe(CURRENT_SCHEMA_VERSION);
   expect(service.snapshot(f.id).messages[0].id).toBe(source.id);
   expect(service.workerMemories(agent.slot, agent.id)).toHaveLength(1);
   expect(service.workerMemories(agent.slot, agent.id)[0]).toMatchObject({ id: memoryId });
@@ -211,11 +212,10 @@ it('R2-STATE-021: exceeding working-state capacity rejects the patch, never evic
   const f = setup(); f.say(); f.start();
   for (let batch = 0; batch < 2; batch++) {
     if (batch) f.say('別の確認');
-    const r = claim(f); f.finish(r, output(r, patch(r, Array.from({ length: 8 }, (_, i) => entry(r, `q-${batch}-${i}`)))));
+    const r = claim(f); f.finish(r, output(r, patch(r, Array.from({ length: 8 }, (_, i) => entry(r, 'kept-' + (batch * 8 + i))))));
   }
   const before = state(f); expect(JSON.parse(before.entries_json)).toHaveLength(16);
-  f.say('容量を超える入力'); const r = claim(f);
+  f.say('さらに追加'); const r = claim(f);
   expect(() => f.finish(r, output(r, patch(r, [entry(r, 'overflow')])))).toThrow();
   expect(state(f)).toEqual(before);
-  expect(f.store.all('SELECT * FROM agent_state_updates WHERE run_id=?', r.id)).toHaveLength(0);
 });

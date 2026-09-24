@@ -1,16 +1,19 @@
-import { LocalMemoryRetriever, recallRequest, type MemoryRetriever } from './recall.js';
+import { MeaningMemoryRetriever, recallRequest, type MemoryRetriever } from './recall.js';
 import { AppError, ensure, InputWindowSchema, type Context, type InputProgress, type InputWindow, type RunKind, type Settings } from '../contracts/index.js';
-import type { Store, AgentRow, MessageRow, RunRow } from '../storage-sqlite/index.js';
+import { profileOf, type Store, type AgentRow, type MessageRow, type RunRow } from '../storage-sqlite/index.js';
+import { boundedContext, contextFits, lookupSelectionSettings } from '../models/context-budget.js';
+import { memoriesCurrent } from './memory-ledger.js';
 
 type CursorRow = { agent_id: string; observed_input: number; memory_input: number; memory_target: number; foreground_runs: number };
 type InputRow = { id: number; session_id: string; kind: 'message' | 'source'; entity_id: string; version: number; created_at: number };
 type SourceRow = { id: string; session_id: string; title: string; text: string; url: string | null; published_at: string | null; fetched_at: number };
 
-/** Only called inside SessionService transactions. The log has no model output or browser events. */
+/** Only called inside SessionService transactions. Input notification order is independent of model output. */
 export class AgentInputs {
   constructor(private readonly store: Store, private readonly now: () => number,
     private readonly project: (row: MessageRow) => Context['messages'][number],
-    private readonly retriever: MemoryRetriever = new LocalMemoryRetriever(store)) {}
+    private readonly retriever: MemoryRetriever = new MeaningMemoryRetriever(store),
+    private readonly measure:()=>number=()=>performance.now()) {}
 
   private cursor(agentId: string): CursorRow {
     this.store.run('INSERT OR IGNORE INTO agent_input_cursors(agent_id) VALUES(?)', agentId);
@@ -36,79 +39,91 @@ export class AgentInputs {
     return this.memoryDue(agent, settings) && this.cursor(agent.id).foreground_runs >= (settings.memoryShareEvery ?? 3);
   }
 
-  /** Build the next exact prefix; optional recent context is selected BEFORE private-state manifest binding. */
+  /** Select mandatory chronological input, relevant memory with originals, then optional recent history. */
   context(agent: AgentRow, input: Context, kind: RunKind, settings: Settings): Context {
     const c = this.cursor(agent.id), memory = kind === 'memory', from = memory ? c.memory_input : c.observed_input;
+    const profile=profileOf(agent);
     let target = this.high(agent.session_id);
     if (memory) {
-      if (c.memory_target <= c.memory_input) {
-        this.store.run('UPDATE agent_input_cursors SET memory_target=? WHERE agent_id=?', target, agent.id);
-      } else target = c.memory_target;
+      if (c.memory_target <= c.memory_input) this.store.run('UPDATE agent_input_cursors SET memory_target=? WHERE agent_id=?', target, agent.id);
+      else target = c.memory_target;
     }
     const rows = this.store.all<InputRow>('SELECT * FROM agent_input_log WHERE session_id=? AND id>? AND id<=? ORDER BY id LIMIT ?',
       agent.session_id, from, target, settings.contextMessages);
-    const { observation: _oldManifest, ...base } = structuredClone(input);
+    const { observation: _oldManifest, inputBudget:_oldBudget, ...base } = structuredClone(input);
     const originalMessages = base.messages, originalMemories = base.memories, originalSources = base.sources;
     base.messages = []; base.memories = []; base.sources = [];
     if (kind === 'observe' || memory) { base.delta = []; base.candidate = null; base.questions = []; }
-    const context: Context = { ...base, progress: this.progress(agent.id, agent.session_id),
+    const coverageComplete=base.coverage?.complete;
+    const context: Context = { ...base, historyTruncated:false, progress: this.progress(agent.id, agent.session_id),
       selection: { omittedRecent: originalMessages.length, omittedMemories: originalMemories.length,
         omittedSources: originalSources.length, reason: 'bounded-before-observation-binding' },
       delivery: { purpose: memory ? 'memory' : 'observation', fromInput: from, throughInput: from,
         targetInput: target, complete: from >= target, entries: [] } };
-    // Reserve for the exact evidence manifest that PrivateStates adds next. No acknowledged item is later removed.
-    const fits = () => JSON.stringify(context).length + 512 + 130 *
-      (context.messages.length + context.delta.length + context.sources.length + (context.retrieved ?? []).flatMap(r => r.messages).length) <= settings.contextChars;
-    ensure(fits(), 422, 'CONTEXT_LIMIT');
+    // Reserve bounded diagnostic space before filling the mandatory prefix. These placeholders never leave selection.
+    if(kind!=='observe')context.recall={algorithm:'owner-meaning-v2',selected:[],
+      omittedForBudget:Array.from({length:12},()=> '00000000-0000-4000-8000-000000000000'),candidates:12,additionalCalls:0,elapsedMs:999999999};
+    const coverage=()=>{if(context.coverage)context.coverage.complete=!!coverageComplete&&context.delivery!.complete;};
+    coverage();
+    let selectionSettings=memory?settings:lookupSelectionSettings(profile,settings);
+    const fits=()=>contextFits(context,kind,profile,selectionSettings);
+    // Existing private state/review evidence takes priority over optional lookup headroom.
+    if(!fits())selectionSettings=settings;
+    ensure(fits(),422,'CONTEXT_LIMIT');
     for (const row of rows) {
       const message = row.kind === 'message' ? this.store.get<MessageRow>('SELECT * FROM messages WHERE id=? AND session_id=?', row.entity_id, agent.session_id) : undefined;
       const source = row.kind === 'source' ? this.store.get<SourceRow>('SELECT * FROM source_items WHERE id=? AND session_id=?', row.entity_id, agent.session_id) : undefined;
       ensure(message || source, 409, 'INPUT_SOURCE_MISSING');
-      const previousMessages = context.messages.length, previousSources = context.sources.length;
+      const previousMessages = context.messages.length, previousSources = context.sources.length,previousThrough=context.delivery!.throughInput;
       if (message && !context.messages.some(m => m.id === message.id)) context.messages.push(this.project(message));
       if (source && !context.sources.some(s => s.id === source.id)) context.sources.push({ id: source.id, title: source.title,
         text: source.text.slice(0, 1600), url: source.url, publishedAt: source.published_at, fetchedAt: source.fetched_at });
       const version = message?.revision ?? source!.fetched_at;
       context.delivery!.entries.push({ inputId: row.id, kind: row.kind, id: row.entity_id,
         eventVersion: row.version, version, superseded: version !== row.version, excerpt: !!source && source.text.length > 1600 });
+      context.delivery!.throughInput=row.id;context.delivery!.complete=row.id>=target;coverage();
       if (!fits()) {
+        // Do not starve one indivisible input merely to reserve optional search space.
+        if(context.delivery!.entries.length===1&&contextFits(context,kind,profile,settings))break;
         context.delivery!.entries.pop(); context.messages.length = previousMessages; context.sources.length = previousSources;
+        context.delivery!.throughInput=previousThrough;context.delivery!.complete=previousThrough>=target;coverage();
         ensure(context.delivery!.entries.length > 0, 422, 'CONTEXT_LIMIT'); break;
       }
-      context.delivery!.throughInput = row.id;
     }
-    context.delivery!.complete = context.delivery!.throughInput >= target;
-    // Review is not complete while mandatory observation input remains unprocessed.
-    if (context.coverage) context.coverage.complete &&= context.delivery!.complete;
     const mandatoryMessages = context.messages.length;
-    if (!memory && kind !== 'observe') {
-      for (const m of originalMessages) {
-        if (context.messages.some(v => v.id === m.id)) { context.selection!.omittedRecent--; continue; }
-        context.messages.push(m);
-        if (!fits()) context.messages.pop(); else context.selection!.omittedRecent--;
+    if(kind!=='observe'){
+      context.messages.sort((a,b)=>a.sequence-b.sequence);
+      const queryContext=(!memory&&!context.messages.length)?{...context,messages:originalMessages}:context;
+      const started=this.measure(),recalled=this.retriever.search(recallRequest(queryContext,agent.session_id,agent.id,this.now(),memory));
+      context.recall={algorithm:'owner-meaning-v2',selected:[],omittedForBudget:recalled.map(row=>row.note.id),candidates:recalled.length,additionalCalls:0,elapsedMs:999999999};
+      context.selection!.omittedMemories=recalled.length;
+      for(const candidate of recalled){
+        const evidence={request:{kind:'memories' as const,query:'automatic related memory',cursor:null},
+          messages:candidate.originals.map(this.project),memories:[candidate.note],nextCursor:null};
+        const position=context.recall.omittedForBudget.indexOf(candidate.note.id);
+        context.recall.omittedForBudget.splice(position,1);
+        context.memories.push(candidate.note);context.retrieved??=[];context.retrieved.push(evidence);
+        context.recall.selected.push({id:candidate.note.id,score:candidate.score,provenance:candidate.provenance});
+        if(!fits()){
+          context.memories.pop();context.retrieved.pop();context.recall.selected.pop();context.recall.omittedForBudget.splice(position,0,candidate.note.id);
+        }else context.selection!.omittedMemories--;
       }
-      context.messages.sort((a, b) => a.sequence - b.sequence);
-      const recalled = this.retriever.search(recallRequest(context, agent.session_id, agent.id));
-      context.recall = { algorithm: 'local-word-evidence-v1', selected: [], omittedForBudget: [] };
-      context.selection!.omittedMemories = recalled.length;
-      for (const candidate of recalled) {
-        const evidence = { request: { kind: 'memories' as const, query: 'automatic related memory', cursor: null },
-          messages: candidate.originals.map(this.project), memories: [candidate.note], nextCursor: null };
-        context.memories.push(candidate.note); context.retrieved ??= []; context.retrieved.push(evidence);
-        context.recall.selected.push({ id: candidate.note.id, score: candidate.score, provenance: candidate.provenance });
-        if (!fits()) {
-          context.memories.pop(); context.retrieved.pop(); context.recall.selected.pop(); context.recall.omittedForBudget.push(candidate.note.id);
-        } else context.selection!.omittedMemories--;
+      context.recall.elapsedMs=Math.min(999999999,Math.max(0,Math.ceil(this.measure()-started)));
+    }
+    if(!memory&&kind!=='observe'){
+      for(const m of originalMessages){
+        if(context.messages.some(v=>v.id===m.id)){context.selection!.omittedRecent--;continue;}
+        context.messages.push(m);if(!fits())context.messages.pop();else context.selection!.omittedRecent--;
       }
-      for (const source of originalSources) {
-        if (context.sources.some(s => s.id === source.id)) { context.selection!.omittedSources--; continue; }
-        context.sources.push(source); if (!fits()) context.sources.pop(); else context.selection!.omittedSources--;
+      for(const source of originalSources){
+        if(context.sources.some(s=>s.id===source.id)){context.selection!.omittedSources--;continue;}
+        context.sources.push(source);if(!fits())context.sources.pop();else context.selection!.omittedSources--;
       }
     }
     context.messages.sort((a, b) => a.sequence - b.sequence);
     context.historyTruncated = context.selection!.omittedRecent > 0 || input.historyTruncated || !context.delivery!.complete;
     ensure(context.messages.length >= mandatoryMessages, 500, 'INPUT_SELECTION_LOST');
-    return context;
+    return boundedContext(context,kind,profile,settings);
   }
 
   validate(run: RunRow): InputWindow {
@@ -130,18 +145,16 @@ export class AgentInputs {
     }
     return window;
   }
-
   reusable(run: RunRow): boolean {
     const captured = (JSON.parse(run.context_json) as Context).self.privateState;
     const current = this.store.get<{version:number}>('SELECT version FROM agent_private_states WHERE agent_id=?', run.agent_id);
-    if (!captured || captured.version !== (current?.version ?? 0)) return false;
+    if (!captured || captured.version !== (current?.version ?? 0)||!memoriesCurrent(this.store,run)) return false;
     try { this.validate(run); return true; }
     catch (error) {
       if (error instanceof AppError && ['STALE_INPUT_CURSOR','STALE_INPUT_EVIDENCE'].includes(error.code)) return false;
       throw error;
     }
   }
-
   complete(run: RunRow): void {
     const window = this.validate(run), memory = run.kind === 'memory';
     const column = memory ? 'memory_input' : 'observed_input';
@@ -150,7 +163,6 @@ export class AgentInputs {
     this.store.run('INSERT INTO agent_input_receipts(run_id,agent_id,purpose,from_input,through_input,target_input,window_json,created_at) VALUES(?,?,?,?,?,?,?,?)',
       run.id, run.agent_id, window.purpose, window.fromInput, window.throughInput, window.targetInput, JSON.stringify(window), this.now());
   }
-
   validateMemory(run: RunRow, sourceIds: string[]): { kind: 'message'; id: string; version: number }[] {
     const context = JSON.parse(run.context_json) as Context;
     return sourceIds.map(id => {
@@ -160,7 +172,6 @@ export class AgentInputs {
       return { kind: 'message', id, version: current.revision };
     });
   }
-
   bindCandidate(candidateId: string, stateVersion: number): void {
     this.store.run('INSERT INTO candidate_state_bindings(candidate_id,state_version) VALUES(?,?) ON CONFLICT(candidate_id) DO UPDATE SET state_version=excluded.state_version', candidateId, stateVersion);
   }

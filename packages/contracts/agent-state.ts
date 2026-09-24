@@ -23,6 +23,7 @@ export const PrivateStateEntrySchema = z.object({
   id: EntryId, kind: z.enum(['understanding', 'interest', 'question', 'intention']),
   text: z.string().trim().min(1).max(500),
   evidence: z.array(EvidenceRefSchema).max(8),
+  derivedFrom: z.array(EntityId).max(8).optional(),
   resume: ResumeConditionSchema.nullable(),
 }).strict();
 export type PrivateStateEntry = z.infer<typeof PrivateStateEntrySchema>;
