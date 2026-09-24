@@ -70,7 +70,11 @@ it('R4-REVIEW-006: a real HTTP Worker carries the first correction across chunks
     expect(response.status).toBe(200);await response.json();expect(f.store.db.inTransaction).toBe(false);
     release();await inFlight;inFlight=undefined;
     expect(f.store.get<CandidateRow>("SELECT * FROM candidates WHERE state='NEEDS_REVIEW'")!.text).toBe('集合は16時です。');
-    for(let i=0;i<30&&f.service.session(f.id).bot_count===0;i++)await worker.once();
+    for(let i=0;i<30&&f.service.session(f.id).bot_count===0;i++){
+      await worker.once();
+      // End this review-only fixture at publication. A further claim legitimately observes the new own message.
+      f.service.commitNext(f.id);
+    }
     expect(f.service.session(f.id).bot_count).toBe(1);expect(captured.length).toBeGreaterThan(2);
     expect(captured.slice(1).some(ctx=>!ctx.delta.some(m=>m.id===correction.id)&&ctx.candidate!.text==='集合は16時です。')).toBe(true);
     expect(f.service.snapshot(f.id).messages.filter(m=>m.authorId!==null).map(m=>m.text)).toEqual(['集合は16時です。']);
