@@ -4,6 +4,7 @@ import { profileOf, type Store, type AgentRow, type MessageRow, type RunRow } fr
 import { boundedContext, contextFits, lookupSelectionSettings } from '../models/context-budget.js';
 import { memoriesCurrent } from './memory-ledger.js';
 import { identityCurrent, candidateIdentityCurrent } from './candidate-integrity.js';
+import { conversationFlow } from './participation.js';
 
 type CursorRow = { agent_id: string; observed_input: number; memory_input: number; memory_target: number; foreground_runs: number };
 type InputRow = { id: number; session_id: string; kind: 'message' | 'source'; entity_id: string; version: number; created_at: number };
@@ -52,6 +53,8 @@ export class AgentInputs {
     const rows = this.store.all<InputRow>('SELECT * FROM agent_input_log WHERE session_id=? AND id>? AND id<=? ORDER BY id LIMIT ?',
       agent.session_id, from, target, settings.contextMessages);
     const { observation: _oldManifest, inputBudget:_oldBudget, ...base } = structuredClone(input);
+    if (kind !== 'memory' && kind !== 'observe') base.conversation = conversationFlow(this.store, agent, base);
+    else delete base.conversation;
     const originalMessages = base.messages, originalMemories = base.memories, originalSources = base.sources;
     base.messages = []; base.memories = []; base.sources = [];
     if (kind === 'observe' || memory) { base.delta = []; base.candidate = null; base.questions = []; }
