@@ -6,6 +6,7 @@ import { CURRENT_SCHEMA_VERSION } from './schema-version.js';
 
 const coreTables=['characters','workers','sessions','agent_instances','candidates','runs','messages','events','command_receipts','traces','llm_calls','memories','pending_questions','source_items','messages_fts'];
 const versionTables:Record<number,string[]>={
+  8:['source_versions','source_feeds','source_feed_versions','source_feed_jobs'],
   2:['provider_health','model_profiles'],3:['agent_private_states','agent_state_updates'],
   4:['agent_input_log','agent_input_cursors','agent_input_receipts','memory_input_origins','candidate_state_bindings'],
   5:['agent_agenda','agent_agenda_bindings','agent_agenda_clock'],
