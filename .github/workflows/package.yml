@@ -1,0 +1,53 @@
+name: Verified distribution bundle
+on:
+  pull_request:
+    branches: [main]
+    paths: ['deploy/package.mjs', 'deploy/package-smoke.mjs', '.github/workflows/package.yml']
+  workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: 'Exact current main SHA approved for packaging; no registry publication or deployment'
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: distribution-bundle-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package-install:
+    if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && inputs.approved_sha == github.sha)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: Build only the exact checked-out source and its lockfile
+        run: node deploy/package.mjs "$GITHUB_SHA" "$RUNNER_TEMP/mls-distribution"
+      - name: Load packaged image, operate archived Compose, backup and restore through CLI and HTTP
+        run: node deploy/package-smoke.mjs "$RUNNER_TEMP/mls-distribution" "$RUNNER_TEMP/mls-distribution/install-e2e.json"
+      - name: Retain the verified bundle without publishing to a registry
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: distribution-${{ github.sha }}
+          path: ${{ runner.temp }}/mls-distribution/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+      - name: Retain small provenance and installation evidence separately
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: distribution-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/mls-distribution/manifest.json
+            ${{ runner.temp }}/mls-distribution/SHA256SUMS
+            ${{ runner.temp }}/mls-distribution/install-e2e.json
+          retention-days: 7
+          if-no-files-found: warn
