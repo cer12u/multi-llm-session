@@ -1,3 +1,4 @@
+import {migrateBudgets} from './budget-migration.js';
 import {migrateDiagnostics} from './diagnostic-migration.js';
 import type Database from 'better-sqlite3';
 import { migrateMemory } from './memory-migration.js';
@@ -145,6 +146,9 @@ function migrateV5(db: Database.Database): void {
         notified INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, triggered_at INTEGER,
         consumed_run TEXT REFERENCES runs(id), ended_at INTEGER, reason TEXT);
       CREATE INDEX agenda_owner_status ON agent_agenda(agent_id,status);
+      CREATE TABLE agent_agenda_bindings(agent_id TEXT PRIMARY KEY REFERENCES agent_instances(id),
+        entry_id TEXT NOT NULL, plan_id TEXT UNIQUE NOT NULL REFERENCES agent_agenda(id));
+      DROP TABLE agent_agenda_bindings;
       CREATE TABLE agent_agenda_bindings(agent_id TEXT NOT NULL REFERENCES agent_instances(id),
         entry_id TEXT NOT NULL, plan_id TEXT UNIQUE NOT NULL REFERENCES agent_agenda(id), PRIMARY KEY(agent_id,entry_id));
       CREATE TABLE agent_agenda_clock(agent_id TEXT PRIMARY KEY REFERENCES agent_instances(id),last_wake_at INTEGER NOT NULL);
@@ -158,10 +162,11 @@ function migrateV5(db: Database.Database): void {
 
 export function migrate(db:Database.Database):void {
   const version=db.pragma('user_version',{simple:true}) as number;
-  if(version===9)return;
-  if(version>9)throw new Error('Unsupported migration source: '+version);
+  if(version===10)return;
+  if(version>10)throw new Error('Unsupported migration source: '+version);
   if(version<6){migrateV5(db);migrateMemory(db);}
   if(version<7)migrateSessions(db);
   if(version<8)migrateSources(db);
-  migrateDiagnostics(db);
+  if(version<9)migrateDiagnostics(db);
+  migrateBudgets(db);
 }

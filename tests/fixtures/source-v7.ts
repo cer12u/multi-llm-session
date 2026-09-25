@@ -3,7 +3,7 @@ import type Database from 'better-sqlite3';
 
 /** Synthetic test fixture only; never use as an operational downgrade. */
 export function asV7Fixture(db:Database.Database):void {
-  if(db.pragma('user_version',{simple:true})===9)asV8Fixture(db);
+  if(Number(db.pragma('user_version',{simple:true}))>=9)asV8Fixture(db);
   if(db.inTransaction||db.pragma('user_version',{simple:true})!==8)throw new Error('EXPECTED_ISOLATED_V8_FIXTURE');
   for(const table of ['source_items','source_versions','source_feeds','source_feed_versions','source_feed_jobs'])
     if(db.prepare('SELECT 1 FROM '+table+' LIMIT 1').get())throw new Error('V8_SOURCE_DATA_CANNOT_BE_DOWNGRADED');
