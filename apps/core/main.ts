@@ -8,7 +8,7 @@ const config=loadConfig(),store=new Store(config.dbPath),service=new SessionServ
 service.recover();
 const app=buildServer(service),poller=new FeedPoller(service);
 let feedJob:Promise<void>|null=null;
-const timer=setInterval(()=>{if(!feedJob)feedJob=poller.tick().finally(()=>{feedJob=null;});},1000);
+const timer=setInterval(()=>{if(!feedJob)feedJob=poller.tick().catch(()=>{console.error('Source scheduler operation failed');}).finally(()=>{feedJob=null;});},1000);
 let stopping=false;
 async function stop() {
   if(stopping)return;stopping=true;clearInterval(timer);await app.close();await feedJob;store.close();

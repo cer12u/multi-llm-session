@@ -1,4 +1,4 @@
-import { XMLParser } from 'fast-xml-parser';
+import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { createHash } from 'node:crypto';
 import { validateFeedUrl } from '../config/source-url.js';
 import type { SourceAdapter } from './adapters.js';
@@ -10,6 +10,7 @@ const list=(v:unknown):unknown[]=>v===undefined||v===null?[]:Array.isArray(v)?v:
 function text(v:unknown):string {if(typeof v==='string'||typeof v==='number')return String(v);if(v&&typeof v==='object')return text((v as Record<string,unknown>)['#text']);return '';}
 export function parseFeed(xml:string):FeedItem[] {
   if(xml.length>1048576||/<!DOCTYPE|<!ENTITY/i.test(xml))throw new Error('UNSAFE_FEED');
+  if(XMLValidator.validate(xml)!==true)throw new Error('FEED_PARSE_ERROR');
   const data=new XMLParser({ignoreAttributes:false,parseTagValue:false,processEntities:false}).parse(xml) as {rss?:{channel?:{item?:unknown}};feed?:{entry?:unknown}};
   if(!data||(!Object.hasOwn(data,'rss')&&!Object.hasOwn(data,'feed')))throw new Error('FEED_PARSE_ERROR');
   return list(data.rss?.channel?.item??data.feed?.entry).slice(0,20).map(raw=>{

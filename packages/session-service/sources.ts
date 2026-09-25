@@ -66,7 +66,7 @@ export class SessionSources {
     });
   }
   update(session:string,id:string,input:unknown,key:string){
-    const data=SourceUpdateSchema.parse(input);return this.p.receipt(`operator:${session}:source-update`,key,{id,...data},()=>{
+    const data=SourceUpdateSchema.parse(input);if(data.audience)data.audience.sort();return this.p.receipt(`operator:${session}:source-update`,key,{id,...data},()=>{
       this.mutable(session);this.audience(session,data.audience);const row=this.row(session,id);
       ensure(row.version===data.expectedVersion,409,'STALE_SOURCE_VERSION');
       const {expectedVersion:_,...next}=data;return this.apply(session,row,next,row.source,row.external_id);
@@ -102,14 +102,14 @@ export class SessionSources {
     this.p.trace(session,null,null,old?'SOURCE_REVISED':'SOURCE_ACQUIRED',{sourceId:id,version});
     return {id,version};
   }
-  configured(){return this.p.config.feeds.map(feed=>{let usable=true;try{validateFeedUrl(feed.url);}catch{usable=false;}
+  configured(){return this.p.config.feeds.map(feed=>{let usable=true;try{validateFeedUrl(feed.url);ensure(feed.intervalMs>=60000&&feed.intervalMs<=86400000,422,'INVALID_FEED_INTERVAL');}catch{usable=false;}
     return {id:feed.id,url:usable?feed.url:null,intervalMs:feed.intervalMs,usable};});}
   feeds(session:string){
     this.p.session(session);return this.p.store.all<FeedRow>('SELECT * FROM source_feeds WHERE session_id=? ORDER BY config_id',session)
       .map(({definition_json,job_token,...row})=>({...row,definition:JSON.parse(definition_json) as FeedDefinition,working:!!job_token&&row.lease_until!==null&&row.lease_until>this.p.now()}));
   }
   putFeed(session:string,input:unknown,key:string){
-    const data=FeedSubscriptionSchema.parse(input);return this.p.receipt(`operator:${session}:feed`,key,data,()=>{
+    const data=FeedSubscriptionSchema.parse(input);if(data.audience)data.audience.sort();return this.p.receipt(`operator:${session}:feed`,key,data,()=>{
       this.mutable(session);this.audience(session,data.audience);
       const config=this.p.config.feeds.find(feed=>feed.id===data.configId);ensure(config,422,'FEED_NOT_ALLOWLISTED');validateFeedUrl(config.url);
       const old=this.p.store.get<FeedRow>('SELECT * FROM source_feeds WHERE session_id=? AND config_id=?',session,data.configId);
@@ -120,11 +120,16 @@ export class SessionSources {
       if(old){
         this.p.store.run("UPDATE source_feed_jobs SET state='STALE',finished_at=?,error_code='CONFIG_CHANGED' WHERE feed_id=? AND state='RUNNING'",this.p.now(),id);
         this.p.store.run('UPDATE source_feeds SET version=?,definition_json=?,enabled=?,next_at=?,job_token=NULL,lease_until=NULL,last_error=NULL,failures=0 WHERE id=?',version,JSON.stringify(definition),data.enabled?1:0,this.p.now(),id);
-        // Subscription audience changes revoke existing originals immediately. Disabling acquisition alone retains originals.
-        for(const source of this.p.store.all<SourceRow>('SELECT * FROM source_items WHERE session_id=? AND source=?',session,'feed:'+id))
+        // Only an explicit audience change retargets originals; changing the interval must not widen item overrides.
+        const previous=JSON.parse(old.definition_json) as FeedDefinition;
+        if(hash(previous.audience)!==hash(data.audience))for(const source of this.p.store.all<SourceRow>('SELECT * FROM source_items WHERE session_id=? AND source=?',session,'feed:'+id))
           if(source.audience_json!==JSON.stringify(data.audience))this.apply(session,source,{...sourceInput(source),audience:data.audience},source.source,source.external_id);
-      }else this.p.store.run('INSERT INTO source_feeds(id,session_id,config_id,version,definition_json,enabled,next_at) VALUES(?,?,?,?,?,?,?)',
-        id,session,config.id,version,JSON.stringify(definition),data.enabled?1:0,this.p.now());
+      }else {
+        this.p.store.run('INSERT INTO source_feeds(id,session_id,config_id,version,definition_json,enabled,next_at) VALUES(?,?,?,?,?,?,?)',
+          id,session,config.id,version,JSON.stringify(definition),data.enabled?1:0,this.p.now());
+        // Adopt the pre-V8 configured-feed namespace without replacing IDs, originals, versions or observations.
+        this.p.store.run('UPDATE source_items SET source=? WHERE session_id=? AND source=?','feed:'+id,session,config.id);
+      }
       this.p.store.run('INSERT INTO source_feed_versions(feed_id,version,definition_json,created_at) VALUES(?,?,?,?)',id,version,JSON.stringify(definition),this.p.now());
       return {id,version};
     });
@@ -136,7 +141,7 @@ export class SessionSources {
     this.p.store.run('UPDATE source_feeds SET next_at=? WHERE id=?',this.p.now(),id);return {ok:true};
   });}
   seedConfigured():void {
-    for(const session of this.p.store.all<{id:string}>("SELECT id FROM sessions WHERE lifecycle='RUNNING'"))for(const config of this.p.config.feeds){
+    for(const session of this.p.store.all<{id:string}>("SELECT id FROM sessions WHERE lifecycle='RUNNING'"))for(const config of this.configured().filter(feed=>feed.usable)){
       if(this.p.store.get('SELECT id FROM source_feeds WHERE session_id=? AND config_id=?',session.id,config.id))continue;
       this.putFeed(session.id,{configId:config.id,expectedVersion:0},'configured:'+hash([session.id,config.id]));
     }
@@ -175,9 +180,11 @@ export class SessionSources {
       const {externalId:_,...content}=item;SourceSchema.parse(content);
     }
     if(!code)for(const item of items){
-      const {externalId,...content}=item,data=SourceSchema.parse({...content,audience:definition.audience});
-      this.audience(job.sessionId,data.audience);
+      const {externalId,...content}=item;
       const old=this.p.store.get<SourceRow>('SELECT * FROM source_items WHERE session_id=? AND source=? AND external_id=?',job.sessionId,'feed:'+job.feedId,externalId);
+      // Acquiring revised text never grants access or re-enables an individually disabled original.
+      // Previously validated instance IDs may now be retired; do not transfer them to a replacement.
+      const data=SourceSchema.parse({...content,audience:old?JSON.parse(old.audience_json):definition.audience,enabled:old?!!old.enabled:true});
       this.apply(job.sessionId,old,data,'feed:'+job.feedId,externalId);
     }
     const failures=code?row.failures+1:0,interval=code?Math.min(3600000,60000*2**Math.min(failures-1,6)):definition.intervalMs;
