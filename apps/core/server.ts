@@ -1,3 +1,4 @@
+import {authorizeWorkerAgentRead} from './worker-read.js';
 import {registerObservabilityRoutes} from './observability-routes.js';
 import {publicTranscript} from '../../packages/observability/index.js';
 import { registerSourceRoutes } from './source-routes.js';
@@ -65,7 +66,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   }
   function key(req:FastifyRequest):string { return header(req,'idempotency-key'); }
   function sessionId(req:FastifyRequest):string { return ParamId.parse(req.params).id; }
-  function ownAgent(req:FastifyRequest,agentId:string):string { const slot=worker(req),agent=service.agent(agentId); ensure(agent.slot===slot&&agent.retired_at===null,403,'PRIVATE_STATE_FORBIDDEN'); return slot; }
+  function ownAgent(req:FastifyRequest,agentId:string):string {return authorizeWorkerAgentRead(service,worker(req),agentId);}
   app.get('/healthz',async()=>({ok:true,sqlite:service.store.sqliteVersion}));
   app.post('/v1/auth/login',async(req,reply)=>{
     ensure(header(req,'origin')===config.publicOrigin,403,'ORIGIN_REQUIRED');
