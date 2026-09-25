@@ -1,7 +1,7 @@
 import {test,expect} from '@playwright/test';
 import {spawn,execFileSync} from 'node:child_process';
 import {createServer} from 'node:http';
-import {mkdtempSync,writeFileSync,readFileSync,rmSync,statSync,existsSync,mkdirSync} from 'node:fs';
+import {mkdtempSync,writeFileSync,readFileSync,rmSync,statSync,existsSync,mkdirSync,readdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve as absolute} from 'node:path';
 
@@ -33,6 +33,12 @@ test('R10-EXPERIMENT-E2E: preflight has no requests; an approved bounded run ret
   const file=join(root,'manifest.json'),output=join(root,'recording');
   const env={...process.env,...Object.fromEntries(profiles.map((p,i)=>[p.apiKeyEnv,'synthetic-experiment-key-'+i]))};
   const entry=absolute('apps/cli/experiment.ts'),loader=import.meta.resolve('tsx');
+  const storage=(args:string[])=>new Promise<any>((resolve,reject)=>{
+    const child=spawn(process.execPath,[absolute('dist/apps/cli/storage.js'),...args],{env,stdio:['ignore','pipe','pipe']});let out='',err='';
+    child.stdout.on('data',chunk=>{out+=chunk;});child.stderr.on('data',chunk=>{err+=chunk;});
+    const timer=setTimeout(()=>child.kill('SIGKILL'),15000);child.once('error',error=>{clearTimeout(timer);reject(error);});
+    child.once('exit',code=>{clearTimeout(timer);if(code!==0){reject(new Error('Product storage CLI failed: '+err));return;}try{resolve(JSON.parse(out));}catch(error){reject(error);}});
+  });
   const invoke=(args:string[],cwd=process.cwd())=>new Promise<{status:number;out:string;err:string}>((resolve,reject)=>{
     const child=spawn(process.execPath,['--import',loader,entry,...args],{env,cwd,stdio:['ignore','pipe','pipe']});let out='',err='';
     child.stdout.on('data',chunk=>{out+=chunk;});child.stderr.on('data',chunk=>{err+=chunk;});
@@ -53,7 +59,7 @@ test('R10-EXPERIMENT-E2E: preflight has no requests; an approved bounded run ret
     const run=await invoke(['execute',file,output],foreign);expect(run.status,run.err+run.out).toBe(0);
     expect(run.out).not.toContain('PRIVATE_EXPERIMENT_CANARY');expect(owners.size).toBe(3);expect(models.size).toBe(3);expect(calls).toBeLessThanOrEqual(manifest.bounds.maxCalls);
     const result=JSON.parse(readFileSync(join(output,'result.json'),'utf8'));
-    expect(result).toMatchObject({status:'EXECUTED',evidenceMode:'synthetic',semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,exitReason:'VOLUNTARY_QUIET'});
+    expect(result).toMatchObject({status:'EXECUTED',evidenceMode:'synthetic',semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,exitReason:'VOLUNTARY_QUIET',recordingStatus:'SAVED',privateRecording:'private-recording.ndjson',privateDatabase:{path:'private-database.sqlite',integrity:'ok'}});
     expect(result.preflightNetworkCalls).toBe(0);expect(result.modelCalls).toBe(calls);expect(result.networkCalls).toBeUndefined();
     expect(new Set(result.usage.byAgent.map((r:{agentId:string})=>r.agentId))).toEqual(owners);
     expect(result.usage.byAgent.reduce((n:number,r:{calls:number})=>n+r.calls,0)).toBe(calls);
@@ -64,6 +70,29 @@ test('R10-EXPERIMENT-E2E: preflight has no requests; an approved bounded run ret
     expect(statSync(output).mode&0o077).toBe(0);expect(statSync(join(output,'private-recording.ndjson')).mode&0o077).toBe(0);
     expect(JSON.parse(readFileSync(join(output,'resources.json'),'utf8')).some((s:{processes:unknown[]})=>s.processes.length===4)).toBe(true);
     const before=calls,again=await invoke(['execute',file,output]);expect(again.status).not.toBe(0);expect(calls).toBe(before);
-    mkdirSync('artifacts',{recursive:true});writeFileSync('artifacts/experiment-e2e.json',JSON.stringify({mode:'synthetic-http-e2e',owners:owners.size,calls,preflightNoSend:true,privateFiles:true,refusesOverwrite:true,executableCheckoutBound:true,perOwnerUsage:true,partialUsageCounted:true,semanticAcceptance:'NOT_EVALUATED'}));
+    // A real second bounded run lowers only its recording quota. Neither the Core
+    // export guard nor its HTTP/model/storage paths are replaced for this case.
+    const limited=join(root,'limited-recording'),firstCalls=calls,firstOwners=owners.size;
+    writeFileSync(file,JSON.stringify({...manifest,recordingMaxBytes:1024}));
+    const limitedRun=await invoke(['execute',file,limited]);expect(limitedRun.status,limitedRun.err+limitedRun.out).toBe(0);
+    const summary=JSON.parse(limitedRun.out);expect(summary.recordingStatus).toBe('SIZE_LIMIT');expect(summary.privateDatabaseRetained).toBe(true);
+    const limitedResult=JSON.parse(readFileSync(join(limited,'result.json'),'utf8'));
+    expect(limitedResult).toMatchObject({status:'EXECUTED',recordingStatus:'SIZE_LIMIT',recordingMaxBytes:1024,privateRecording:null,semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,
+      privateDatabase:{path:'private-database.sqlite',integrity:'ok',rows:{agent_private_states:3}}});
+    expect(limitedResult.recordingWarning).toContain('No complete NDJSON replay');
+    expect(limitedResult.modelCalls).toBe(calls-firstCalls);expect(calls-firstCalls).toBeLessThanOrEqual(manifest.bounds.maxCalls);expect(owners.size-firstOwners).toBe(3);
+    expect(existsSync(join(limited,'private-recording.ndjson'))).toBe(false);expect(existsSync(join(limited,'failure.json'))).toBe(false);
+    expect(readdirSync(limited).some(name=>name.includes('.partial-'))).toBe(false);
+    expect(existsSync(join(limited,'resources.json'))).toBe(true);expect(statSync(join(limited,'private-database.sqlite')).mode&0o077).toBe(0);
+    expect(limitedRun.out).not.toContain('PRIVATE_EXPERIMENT_CANARY');
+    // The fallback is an actual restorable SQLite backup, not a success flag.
+    const restored=join(root,'restored-experiment.sqlite');
+    const copy=await storage(['restore',join(limited,'private-database.sqlite'),restored]);
+    expect(copy.integrity).toBe('ok');expect(copy.schemaVersion).toBe(limitedResult.privateDatabase.schemaVersion);
+    const inspected=await storage(['inspect',restored]);expect(inspected.rows).toEqual(limitedResult.privateDatabase.rows);
+    expect(inspected.rows.agent_private_states).toBe(3);expect(inspected.rows.messages).toBe(1);
+    expect(statSync(restored).mode&0o077).toBe(0);
+    mkdirSync('artifacts',{recursive:true});writeFileSync('artifacts/experiment-e2e.json',JSON.stringify({mode:'synthetic-http-e2e',owners:firstOwners,calls:firstCalls,preflightNoSend:true,privateFiles:true,refusesOverwrite:true,executableCheckoutBound:true,perOwnerUsage:true,partialUsageCounted:true,
+      boundedRecording:{byteLimit:1024,status:limitedResult.recordingStatus,calls:calls-firstCalls,owners:owners.size-firstOwners,resultRetained:true,privateDatabaseRestored:true,partialFilesRemoved:true},semanticAcceptance:'NOT_EVALUATED'}));
   }finally{provider.closeAllConnections();await new Promise<void>(resolve=>provider.close(()=>resolve()));rmSync(root,{recursive:true,force:true});}
 });
