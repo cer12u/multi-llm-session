@@ -87,6 +87,7 @@ PRAGMA user_version=1;
 export class Store {
   readonly db: Database.Database;
   readonly sqliteVersion: string;
+  private readonly statements=new Map<string,Database.Statement>();
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
@@ -103,10 +104,20 @@ export class Store {
       migrate(this.db);
     } catch(error) { this.db.close(); throw error; }
   }
-  get<T>(sql: string, ...args: unknown[]): T|undefined { return this.db.prepare(sql).get(...args) as T|undefined; }
-  all<T>(sql: string, ...args: unknown[]): T[] { return this.db.prepare(sql).all(...args) as T[]; }
-  run(sql: string, ...args: unknown[]): Database.RunResult { return this.db.prepare(sql).run(...args); }
+  /** Bound repeated statement compilation, especially the recorded-transition trigger programs. */
+  private prepared(sql:string):Database.Statement {
+    let statement=this.statements.get(sql);
+    if(statement)this.statements.delete(sql);
+    else {
+      statement=this.db.prepare(sql);
+      if(this.statements.size>=256)this.statements.delete(this.statements.keys().next().value!);
+    }
+    this.statements.set(sql,statement);return statement;
+  }
+  get<T>(sql: string, ...args: unknown[]): T|undefined { return this.prepared(sql).get(...args) as T|undefined; }
+  all<T>(sql: string, ...args: unknown[]): T[] { return this.prepared(sql).all(...args) as T[]; }
+  run(sql: string, ...args: unknown[]): Database.RunResult { return this.prepared(sql).run(...args); }
   tx<T>(fn: () => T): T { return this.db.transaction(fn).immediate(); }
-  close(): void { this.db.close(); }
+  close(): void { this.statements.clear();this.db.close(); }
   backup(path: string): Promise<Database.BackupMetadata> { return this.db.backup(path); }
 }
