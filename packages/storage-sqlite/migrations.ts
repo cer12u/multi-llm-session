@@ -122,7 +122,7 @@ function migrateV4(db: Database.Database): void {
       CREATE TABLE candidate_state_bindings(candidate_id TEXT PRIMARY KEY REFERENCES candidates(id),state_version INTEGER NOT NULL);
       CREATE TABLE memory_input_origins(memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
         run_id TEXT NOT NULL REFERENCES runs(id),evidence_json TEXT NOT NULL);
-      INSERT INTO agent_input_cursors(agent_id) SELECT id FROM agent_instances;
+      INSERT INTO agent_input_cursors(agent_id) SELECT id,0,0,0,0 FROM agent_instances;
       UPDATE runs SET state='CANCELLED' WHERE state='ACTIVE';
       UPDATE llm_calls SET status='ABANDONED' WHERE status='RESERVED';
       UPDATE candidates SET state='NEEDS_REVIEW',reason='INPUT_CURSOR_UPGRADE' WHERE state='READY';
@@ -146,9 +146,6 @@ function migrateV5(db: Database.Database): void {
         notified INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, triggered_at INTEGER,
         consumed_run TEXT REFERENCES runs(id), ended_at INTEGER, reason TEXT);
       CREATE INDEX agenda_owner_status ON agent_agenda(agent_id,status);
-      CREATE TABLE agent_agenda_bindings(agent_id TEXT PRIMARY KEY REFERENCES agent_instances(id),
-        entry_id TEXT NOT NULL, plan_id TEXT UNIQUE NOT NULL REFERENCES agent_agenda(id));
-      DROP TABLE agent_agenda_bindings;
       CREATE TABLE agent_agenda_bindings(agent_id TEXT NOT NULL REFERENCES agent_instances(id),
         entry_id TEXT NOT NULL, plan_id TEXT UNIQUE NOT NULL REFERENCES agent_agenda(id), PRIMARY KEY(agent_id,entry_id));
       CREATE TABLE agent_agenda_clock(agent_id TEXT PRIMARY KEY REFERENCES agent_instances(id),last_wake_at INTEGER NOT NULL);
