@@ -1,3 +1,4 @@
+import {BudgetPanel} from './budget-panel.js';
 import {DiagnosticExplorer} from './diagnostic-explorer.js';
 import React, {useEffect,useRef,useState} from 'react';
 import {operationLabels,type AgentOperation,type Operations} from '../../../packages/contracts/operations.js';
@@ -39,6 +40,7 @@ export function OperationsPanel({sessionId,api,refresh}:{sessionId:string;api:Ap
         {report.session.lifecycle==='RUNNING'&&<button type="button" disabled={busy} onClick={()=>void recover(`/v1/sessions/${sessionId}/pause`,'セッションを一時停止します。送信済みの外部推論が取り消される保証はありません。続行しますか？')}>診断から一時停止</button>}
         {report.session.lifecycle==='PAUSED'&&<button type="button" disabled={busy||report.session.activity==='BUDGET_PAUSED'} onClick={()=>void recover(`/v1/sessions/${sessionId}/resume`,'既存の予算内でセッションを再開します。続行しますか？')}>診断から再開</button>}
       </div>
+      <BudgetPanel key={sessionId} sessionId={sessionId} api={api} refresh={refresh}/>
       <SessionMembers sessionId={sessionId} currentEpoch={report.session.epoch} lifecycle={report.session.lifecycle} api={api} refresh={refresh}/>
       {report.agents.map(row=><article className="agent-operation" key={row.agent.id} data-operation-agent={row.agent.id}>
         <h4>{row.agent.name}</h4><p className="operation-reason">{operationLabels[row.reason]}</p>
