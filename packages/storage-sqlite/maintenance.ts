@@ -3,6 +3,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openS
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { CURRENT_SCHEMA_VERSION } from './schema-version.js';
+import { checkSourceStructure } from './source-integrity.js';
 
 const coreTables=['characters','workers','sessions','agent_instances','candidates','runs','messages','events','command_receipts','traces','llm_calls','memories','pending_questions','source_items','messages_fts'];
 const versionTables:Record<number,string[]>={
@@ -28,6 +29,7 @@ function check(db:Database.Database):number {
   const tables=new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {name:string}[]).map(r=>r.name));
   const required=[...coreTables,...Object.entries(versionTables).filter(([v])=>Number(v)<=version).flatMap(([,names])=>names)];
   if(required.some(name=>!tables.has(name)))throw new Error('STORAGE_SCHEMA_INCOMPLETE');
+  if(version>=8)checkSourceStructure(db);
   if(version>=7){
     const columns=db.prepare('PRAGMA table_info(agent_instances)').all() as {name:string}[];
     const objects=new Set((db.prepare("SELECT name FROM sqlite_master WHERE type IN ('index','trigger')").all() as {name:string}[]).map(x=>x.name));
@@ -76,7 +78,7 @@ export async function backupDatabase(source:string,destination:string):Promise<S
 /** Restore to a new path. Existing operational DB/WAL files are never replaced automatically. */
 export async function restoreDatabase(backup:string,destination:string):Promise<StorageReport>{return backupDatabase(backup,destination);}
 /** Explicit offline operation, not an additional long-running DB writer. Caller must stop Core and workers first. */
-export function maintainDatabase(source:string,acknowledgeOffline:boolean):StorageReport {
+export function maintainDatabase(source:string,acknowledgeOffline:boolean):Promise<never>|StorageReport {
   if(!acknowledgeOffline)throw new Error('STORAGE_OFFLINE_ACK_REQUIRED');
   const path=existing(source),db=openExisting(path,false);
   try{
