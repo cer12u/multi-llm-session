@@ -55,7 +55,7 @@ export function diagnosticExport(service:SessionService,id:string,env:NodeJS.Pro
       FROM diagnostic_journal WHERE session_id=?`,id)!;
     ensure(meta.bytes<MAX_DIAGNOSTIC_BYTES/2,413,'DIAGNOSTIC_SIZE_LIMIT');
     const projection=diagnosticProjection(service.store.db),state=diagnosticSnapshot(service.store,id,projection);
-    const result:Header={type:'manifest',kind:'private-session-diagnostic',formatVersion:1,databaseSchema:9,sessionId:id,
+    const result:Header={type:'manifest',kind:'private-session-diagnostic',formatVersion:1,databaseSchema:Number(service.store.db.pragma('user_version',{simple:true})) as 9|10,sessionId:id,
       high:meta.high,records:meta.records,baselineRecords:meta.baseline,stateRows:state.reduce((n,t)=>n+t.rows.length,0),
       stateHash:snapshotHash(state),projection,manifest:diagnosticManifest(service,id,env)};
     return result;
