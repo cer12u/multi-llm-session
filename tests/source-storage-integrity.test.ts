@@ -1,3 +1,4 @@
+import {CURRENT_SCHEMA_VERSION} from '../packages/storage-sqlite/schema-version.js';
 import {expect,it} from 'vitest';
 import {mkdtempSync,rmSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -13,7 +14,7 @@ it.each([
   const dir=mkdtempSync(join(tmpdir(),'source-integrity-')),path=join(dir,'bad.sqlite'),f=fixture(3,{selfWakeEnabled:false},path);
   try{
     f.service.injectSource(f.id,{title:'original',text:'must retain its version'},randomUUID());
-    expect(inspectDatabase(path).schemaVersion).toBe(8);f.store.db.exec(sql);
+    expect(inspectDatabase(path).schemaVersion).toBe(CURRENT_SCHEMA_VERSION);f.store.db.exec(sql);
     expect(()=>inspectDatabase(path)).toThrow(code);
     const target=join(dir,'must-not-exist.sqlite');await expect(restoreDatabase(path,target)).rejects.toThrow(code);
     expect(existsSync(target)).toBe(false);
