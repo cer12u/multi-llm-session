@@ -9,7 +9,7 @@ import {ModelProfileSchema,WireOutputSchemas} from '../packages/contracts/index.
 it('R10-SEC-010: all integrated public read projections exclude private state/persona/source/candidates and credential values',async()=>{
   const f=fixture(3,{memoryEvery:3}),app=buildServer(f.service,{timers:false});vi.stubEnv('SYNTHETIC_SECURITY_KEY','SEC_ACTUAL_KEY_VALUE');
   try{
-    const {owner,messageId}=saveOwnerExperience(f),[a,b]=f.service.agents(f.id);
+    const {owner,original}=saveOwnerExperience(f),messageId=original.id,[a,b]=f.service.agents(f.id);
     f.service.putModelProfile(ModelProfileSchema.parse({id:'security-profile',provider:'openai',model:'fixture',baseUrl:'https://fixture.invalid/v1',apiKeyEnv:'SYNTHETIC_SECURITY_KEY'}));
     const privateSource=f.service.injectSource(f.id,{title:'SEC_PRIVATE_TITLE',text:'SEC_PRIVATE_ORIGINAL',audience:[owner]},randomUUID());
     f.speak(f.claim(b.slot)!);f.finish(f.claim(b.slot)!,{decision:'DRAFT',text:'SEC_UNPUBLISHED_CANDIDATE'});
