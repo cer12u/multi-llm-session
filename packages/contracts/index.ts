@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { BudgetLimitsSchema } from './budget.js';
+export * from './budget.js';
 export * from './source.js';
 import type { SourceChunk } from './source.js';
 import { StatePatchSchema, type PrivateState, type ObservationManifest } from './agent-state.js';
@@ -43,6 +45,7 @@ export const ModelProfileSchema = z.object({
 export type ModelProfile = z.infer<typeof ModelProfileSchema>;
 
 export const SettingsSchema = z.object({
+  ...BudgetLimitsSchema.shape,
   debounceMs: z.number().int().min(0).max(10000).default(800),
   maxCoalesceMs: z.number().int().min(0).max(30000).default(2000),
   directedDebounceMs: z.number().int().min(0).max(10000).default(200),
