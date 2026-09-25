@@ -5,10 +5,10 @@ import { boundedContext, contextFits, lookupSelectionSettings } from '../models/
 import { memoriesCurrent } from './memory-ledger.js';
 import { identityCurrent, candidateIdentityCurrent } from './candidate-integrity.js';
 import { conversationFlow } from './participation.js';
+import { inputHigh, ownerSource, sourceChunk, visibleInputSQL } from './source-access.js';
 
 type CursorRow = { agent_id: string; observed_input: number; memory_input: number; memory_target: number; foreground_runs: number };
 type InputRow = { id: number; session_id: string; kind: 'message' | 'source'; entity_id: string; version: number; created_at: number };
-type SourceRow = { id: string; session_id: string; title: string; text: string; url: string | null; published_at: string | null; fetched_at: number };
 
 /** Only called inside SessionService transactions. Input notification order is independent of model output. */
 export class AgentInputs {
@@ -21,20 +21,18 @@ export class AgentInputs {
     this.store.run('INSERT OR IGNORE INTO agent_input_cursors(agent_id) VALUES(?)', agentId);
     return this.store.get<CursorRow>('SELECT * FROM agent_input_cursors WHERE agent_id=?', agentId)!;
   }
-  high(sessionId: string): number {
-    return this.store.get<{ n: number }>('SELECT COALESCE(MAX(id),0) n FROM agent_input_log WHERE session_id=?', sessionId)!.n;
-  }
-  private backlog(sessionId: string, cursor: number) {
-    return this.store.get<{ n: number; oldest: number | null }>('SELECT COUNT(*) n,MIN(created_at) oldest FROM agent_input_log WHERE session_id=? AND id>?', sessionId, cursor)!;
+  high(sessionId: string,agentId?:string): number {return inputHigh(this.store,sessionId,agentId);}
+  private backlog(sessionId: string, cursor: number,agentId:string) {
+    return this.store.get<{ n: number; oldest: number | null }>(`SELECT COUNT(*) n,MIN(i.created_at) oldest FROM agent_input_log i WHERE i.session_id=? AND i.id>? AND ${visibleInputSQL()}`, sessionId,cursor,agentId)!;
   }
   progress(agentId: string, sessionId: string): InputProgress {
-    const c = this.cursor(agentId), observation = this.backlog(sessionId, c.observed_input), memory = this.backlog(sessionId, c.memory_input);
-    return { observedInput: c.observed_input, memoryInput: c.memory_input, highWater: this.high(sessionId),
+    const c = this.cursor(agentId), observation = this.backlog(sessionId, c.observed_input,agentId), memory = this.backlog(sessionId, c.memory_input,agentId);
+    return { observedInput: c.observed_input, memoryInput: c.memory_input, highWater: Math.max(c.observed_input,c.memory_input,this.high(sessionId,agentId)),
       observationPending: observation.n, memoryPending: memory.n, oldestObservationAt: observation.oldest, oldestMemoryAt: memory.oldest };
   }
   memoryDue(agent: AgentRow, settings: Settings): boolean {
-    const c = this.cursor(agent.id), backlog = this.backlog(agent.session_id, c.memory_input);
-    return c.memory_target > c.memory_input || backlog.n >= settings.memoryEvery ||
+    const c = this.cursor(agent.id), backlog = this.backlog(agent.session_id, c.memory_input,agent.id);
+    return c.memory_target > c.memory_input && backlog.n>0 || backlog.n >= settings.memoryEvery ||
       (backlog.n > 0 && backlog.oldest !== null && this.now() - backlog.oldest >= (settings.memoryFlushMs ?? 60000));
   }
   memoryTurn(agent: AgentRow, settings: Settings): boolean {
@@ -45,13 +43,13 @@ export class AgentInputs {
   context(agent: AgentRow, input: Context, kind: RunKind, settings: Settings): Context {
     const c = this.cursor(agent.id), memory = kind === 'memory', from = memory ? c.memory_input : c.observed_input;
     const profile=profileOf(agent);
-    let target = this.high(agent.session_id);
+    let target = Math.max(from,this.high(agent.session_id,agent.id));
     if (memory) {
       if (c.memory_target <= c.memory_input) this.store.run('UPDATE agent_input_cursors SET memory_target=? WHERE agent_id=?', target, agent.id);
-      else target = c.memory_target;
+      else target = Math.max(from,Math.min(target,c.memory_target));
     }
-    const rows = this.store.all<InputRow>('SELECT * FROM agent_input_log WHERE session_id=? AND id>? AND id<=? ORDER BY id LIMIT ?',
-      agent.session_id, from, target, settings.contextMessages);
+    const rows = this.store.all<InputRow>(`SELECT i.* FROM agent_input_log i WHERE i.session_id=? AND i.id>? AND i.id<=? AND ${visibleInputSQL()} ORDER BY i.id LIMIT ?`,
+      agent.session_id, from, target, agent.id, settings.contextMessages);
     const { observation: _oldManifest, inputBudget:_oldBudget, ...base } = structuredClone(input);
     if (kind !== 'memory' && kind !== 'observe') base.conversation = conversationFlow(this.store, agent, base);
     else delete base.conversation;
@@ -76,13 +74,12 @@ export class AgentInputs {
     ensure(fits(),422,'CONTEXT_LIMIT');
     for (const row of rows) {
       const message = row.kind === 'message' ? this.store.get<MessageRow>('SELECT * FROM messages WHERE id=? AND session_id=?', row.entity_id, agent.session_id) : undefined;
-      const source = row.kind === 'source' ? this.store.get<SourceRow>('SELECT * FROM source_items WHERE id=? AND session_id=?', row.entity_id, agent.session_id) : undefined;
+      const source = row.kind === 'source' ? ownerSource(this.store,agent.session_id,agent.id,row.entity_id) : undefined;
       ensure(message || source, 409, 'INPUT_SOURCE_MISSING');
       const previousMessages = context.messages.length, previousSources = context.sources.length,previousThrough=context.delivery!.throughInput;
       if (message && !context.messages.some(m => m.id === message.id)) context.messages.push(this.project(message));
-      if (source && !context.sources.some(s => s.id === source.id)) context.sources.push({ id: source.id, title: source.title,
-        text: source.text.slice(0, 1600), url: source.url, publishedAt: source.published_at, fetchedAt: source.fetched_at });
-      const version = message?.revision ?? source!.fetched_at;
+      if (source && !context.sources.some(s => s.id === source.id)) context.sources.push(sourceChunk(source,agent.id));
+      const version = message?.revision ?? source!.version;
       context.delivery!.entries.push({ inputId: row.id, kind: row.kind, id: row.entity_id,
         eventVersion: row.version, version, superseded: version !== row.version, excerpt: !!source && source.text.length > 1600 });
       context.delivery!.throughInput=row.id;context.delivery!.complete=row.id>=target;coverage();
@@ -93,6 +90,11 @@ export class AgentInputs {
         context.delivery!.throughInput=previousThrough;context.delivery!.complete=previousThrough>=target;coverage();
         ensure(context.delivery!.entries.length > 0, 422, 'CONTEXT_LIMIT'); break;
       }
+    }
+    // A completed authorized range can contain excluded private/revoked notification IDs. They are not observations.
+    if(!this.store.get(`SELECT i.id FROM agent_input_log i WHERE i.session_id=? AND i.id>? AND i.id<=? AND ${visibleInputSQL()} LIMIT 1`,
+      agent.session_id,context.delivery!.throughInput,target,agent.id)){
+      context.delivery!.throughInput=target;context.delivery!.complete=true;coverage();
     }
     const mandatoryMessages = context.messages.length;
     if(kind!=='observe'){
@@ -135,17 +137,21 @@ export class AgentInputs {
     const window = InputWindowSchema.parse(context.delivery), c = this.cursor(run.agent_id);
     ensure(window.purpose === (run.kind === 'memory' ? 'memory' : 'observation'), 409, 'INPUT_PURPOSE_MISMATCH');
     ensure(window.fromInput === (run.kind === 'memory' ? c.memory_input : c.observed_input), 409, 'STALE_INPUT_CURSOR');
-    const expected = this.store.all<InputRow>('SELECT * FROM agent_input_log WHERE session_id=? AND id>? AND id<=? ORDER BY id',
-      run.session_id, window.fromInput, window.throughInput);
+    const expected = this.store.all<InputRow>(`SELECT i.* FROM agent_input_log i WHERE i.session_id=? AND i.id>? AND i.id<=? AND ${visibleInputSQL()} ORDER BY i.id`,
+      run.session_id, window.fromInput, window.throughInput,run.agent_id);
     ensure(expected.length === window.entries.length && expected.every((r, i) => r.id === window.entries[i].inputId &&
       r.kind === window.entries[i].kind && r.entity_id === window.entries[i].id && r.version === window.entries[i].eventVersion), 409, 'INPUT_COVERAGE_MISMATCH');
-    ensure(window.throughInput >= window.fromInput && window.throughInput <= window.targetInput && window.targetInput <= this.high(run.session_id) &&
+    ensure(window.throughInput >= window.fromInput && window.throughInput <= window.targetInput && window.targetInput <= Math.max(window.fromInput,this.high(run.session_id,run.agent_id)) &&
       window.complete === (window.throughInput >= window.targetInput), 409, 'INPUT_COVERAGE_MISMATCH');
     for (const entry of window.entries) {
       const current = entry.kind === 'message'
         ? this.store.get<{ version: number }>('SELECT revision version FROM messages WHERE id=? AND session_id=?', entry.id, run.session_id)
-        : this.store.get<{ version: number }>('SELECT fetched_at version FROM source_items WHERE id=? AND session_id=?', entry.id, run.session_id);
+        : ownerSource(this.store,run.session_id,run.agent_id,entry.id);
       ensure(current?.version === entry.version, 409, 'STALE_INPUT_EVIDENCE');
+    }
+    for(const source of context.sources){
+      const current=ownerSource(this.store,run.session_id,run.agent_id,source.id);
+      ensure(current.version===(source.version??source.fetchedAt),409,'STALE_INPUT_EVIDENCE');
     }
     return window;
   }
@@ -157,7 +163,7 @@ export class AgentInputs {
     if (!captured || captured.version !== (current?.version ?? 0)||!memoriesCurrent(this.store,run)) return false;
     try { this.validate(run); return true; }
     catch (error) {
-      if (error instanceof AppError && ['STALE_INPUT_CURSOR','STALE_INPUT_EVIDENCE'].includes(error.code)) return false;
+      if (error instanceof AppError && ['STALE_INPUT_CURSOR','STALE_INPUT_EVIDENCE','SOURCE_NOT_FOUND','INPUT_COVERAGE_MISMATCH'].includes(error.code)) return false;
       throw error;
     }
   }
@@ -165,7 +171,7 @@ export class AgentInputs {
     const window = this.validate(run), memory = run.kind === 'memory';
     const column = memory ? 'memory_input' : 'observed_input';
     this.store.run(`UPDATE agent_input_cursors SET ${column}=?,foreground_runs=${memory ? '0' : 'foreground_runs+1'} WHERE agent_id=?`, window.throughInput, run.agent_id);
-    if (memory && window.complete) this.store.run('UPDATE agent_input_cursors SET memory_target=? WHERE agent_id=?', this.high(run.session_id), run.agent_id);
+    if (memory && window.complete) this.store.run('UPDATE agent_input_cursors SET memory_target=? WHERE agent_id=?', this.high(run.session_id,run.agent_id), run.agent_id);
     this.store.run('INSERT INTO agent_input_receipts(run_id,agent_id,purpose,from_input,through_input,target_input,window_json,created_at) VALUES(?,?,?,?,?,?,?,?)',
       run.id, run.agent_id, window.purpose, window.fromInput, window.throughInput, window.targetInput, JSON.stringify(window), this.now());
   }

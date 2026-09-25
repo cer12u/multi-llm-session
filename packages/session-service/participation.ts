@@ -1,3 +1,4 @@
+import { inputHigh } from './source-access.js';
 import { ensure, type Context, type PrivateStateEntry } from '../contracts/index.js';
 import type { ConversationFlow, ParticipationAssessment } from '../contracts/participation.js';
 import { repetitionSignals } from '../conversation/index.js';
@@ -5,9 +6,6 @@ import type { AgentRow, Store } from '../storage-sqlite/index.js';
 
 function lastAssessment(entries: PrivateStateEntry[]): ParticipationAssessment | null {
   return entries.find(entry => entry.participation)?.participation ?? null;
-}
-function high(store: Store, sessionId: string): number {
-  return store.get<{ n: number }>('SELECT COALESCE(MAX(id),0) n FROM agent_input_log WHERE session_id=?', sessionId)!.n;
 }
 
 /** Private purpose history belongs to this owner only; current public originals remain separate evidence. */
@@ -25,7 +23,7 @@ export function conversationFlow(store: Store, agent: AgentRow, context: Context
       const purpose = (JSON.parse(row.intent_json) as { intent: string }).intent;
       return { messageId: row.id, revision: row.revision, act: row.act, purpose: purpose.slice(0, 160), excerpt: purpose.length > 160 };
     }),
-    previousAssessment: assessment ? { code: assessment.code, current: assessment.throughInput === high(store, agent.session_id) } : null,
+    previousAssessment: assessment ? { code: assessment.code, current: assessment.throughInput === inputHigh(store, agent.session_id,agent.id) } : null,
   };
 }
 
@@ -39,9 +37,9 @@ export function validateParticipationEntry(context: Context, kind: string, entry
   }
 }
 
-/** Read-only operator reason. New source OR message input invalidates an old disposition without deleting owner history. */
+/** Read-only operator reason. New authorized source OR message input invalidates an old disposition without deleting owner history. */
 export function currentDisposition(store: Store, agent: AgentRow): ParticipationAssessment['code'] | null {
   const row = store.get<{ entries_json: string }>('SELECT entries_json FROM agent_private_states WHERE agent_id=?', agent.id);
   const assessment = lastAssessment(row ? JSON.parse(row.entries_json) as PrivateStateEntry[] : []);
-  return assessment && assessment.throughInput === high(store, agent.session_id) ? assessment.code : null;
+  return assessment && assessment.throughInput === inputHigh(store, agent.session_id,agent.id) ? assessment.code : null;
 }

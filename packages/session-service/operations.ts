@@ -1,3 +1,4 @@
+import { visibleInputSQL } from './source-access.js';
 import { currentDisposition } from './participation.js';
 import { credential } from '../config/credentials.js';
 import { hash } from '../domain/index.js';
@@ -32,7 +33,7 @@ export function operations(service:SessionService,id:string,env:NodeJS.ProcessEn
       const candidate=service.store.get<{state:string;not_before:number}>("SELECT state,not_before FROM candidates WHERE agent_id=? AND state IN ('DRAFTING','READY','NEEDS_REVIEW','DEFERRED')",a.id);
       const cursor=service.store.get<{observed_input:number;memory_input:number}>('SELECT observed_input,memory_input FROM agent_input_cursors WHERE agent_id=?',a.id);
       const pending=service.store.get<{observation:number;memory:number}>(
-        'SELECT COALESCE(SUM(id>?),0) observation,COALESCE(SUM(id>?),0) memory FROM agent_input_log WHERE session_id=?',cursor?.observed_input??0,cursor?.memory_input??0,id)!;
+        `SELECT COALESCE(SUM(i.id>?),0) observation,COALESCE(SUM(i.id>?),0) memory FROM agent_input_log i WHERE i.session_id=? AND ${visibleInputSQL()}`,cursor?.observed_input??0,cursor?.memory_input??0,id,a.id)!;
       const deferral=a.deferral_json?JSON.parse(a.deferral_json) as {kind:string;agentId:string|null;until:number}:null;
       let reason:OperationReason='QUIET',next:number|null=null;
       if(s.lifecycle==='ENDED')reason='SESSION_ENDED';

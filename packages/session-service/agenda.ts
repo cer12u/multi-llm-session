@@ -1,3 +1,4 @@
+import { visibleInputSQL, sourceAllowed, type SourceRow } from './source-access.js';
 import { randomUUID } from 'node:crypto';
 import { ensure, type AgendaContext, type AgendaSignal, type Context, type PrivateState, type PrivateStateEntry, type Settings } from '../contracts/index.js';
 import type { AgentRow, MessageRow, RunRow, Store } from '../storage-sqlite/index.js';
@@ -49,10 +50,12 @@ export class AgentAgenda {
     if (plan.matched_input === null) return true;
     const input = this.store.get<Notification>('SELECT id,kind,entity_id,version FROM agent_input_log WHERE id=?', plan.matched_input);
     if (!input || input.version !== plan.matched_version) return false;
-    const live = input.kind === 'message'
-      ? this.store.get<{version:number;deleted:number}>('SELECT revision version,deleted FROM messages WHERE id=?', input.entity_id)
-      : this.store.get<{version:number;deleted:number}>('SELECT fetched_at version,0 deleted FROM source_items WHERE id=?', input.entity_id);
-    return !!live && !live.deleted && live.version === plan.matched_version;
+    if(input.kind==='message') {
+      const live=this.store.get<{version:number;deleted:number}>('SELECT revision version,deleted FROM messages WHERE id=?',input.entity_id);
+      return !!live&&!live.deleted&&live.version===plan.matched_version;
+    }
+    const source=this.store.get<SourceRow>('SELECT * FROM source_items WHERE id=?',input.entity_id);
+    return !!source&&source.version===plan.matched_version&&sourceAllowed(source,plan.agent_id);
   }
 
   reusable(run: RunRow): boolean {
@@ -81,14 +84,14 @@ export class AgentAgenda {
           this.store.run("UPDATE agent_agenda SET status='TRIGGERED',triggered_at=?,reason='TIME_DUE' WHERE id=?", this.now(), plan.id);
         continue;
       }
-      const rows = this.store.all<Notification>('SELECT id,kind,entity_id,version FROM agent_input_log WHERE session_id=? AND id>? ORDER BY id LIMIT 100', agent.session_id, plan.checked_input);
+      const rows = this.store.all<Notification>(`SELECT i.id,i.kind,i.entity_id,i.version FROM agent_input_log i WHERE i.session_id=? AND i.id>? AND ${visibleInputSQL()} ORDER BY i.id LIMIT 100`, agent.session_id, plan.checked_input,agent.id);
       for (const input of rows) {
         const message = input.kind === 'message' ? this.store.get<MessageRow>('SELECT * FROM messages WHERE id=? AND session_id=?', input.entity_id, agent.session_id) : undefined;
-        const source = input.kind === 'source' ? this.store.get<{title:string;text:string;fetched_at:number}>('SELECT title,text,fetched_at FROM source_items WHERE id=? AND session_id=?', input.entity_id, agent.session_id) : undefined;
+        const source = input.kind === 'source' ? this.store.get<SourceRow>('SELECT * FROM source_items WHERE id=? AND session_id=?', input.entity_id, agent.session_id) : undefined;
         const isOther = !!message && !message.deleted && message.author_id !== agent.id && message.revision === input.version;
         let matches = condition.kind === 'new_message' ? isOther : condition.kind === 'answer_from' ? isOther && message!.author_id === condition.agentId : false;
         if (condition.kind === 'related_topic') {
-          const text = isOther ? message!.text : source?.fetched_at === input.version ? source.title + '\n' + source.text : '';
+          const text = isOther ? message!.text : source?.version === input.version ? source.title + '\n' + source.text : '';
           matches = !!text && normal(text).includes(normal(condition.topic!));
         }
         this.store.run('UPDATE agent_agenda SET checked_input=? WHERE id=?', input.id, plan.id);

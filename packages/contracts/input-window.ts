@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-/** A contiguous range of durable input notifications, distinct from public revision and model understanding. */
+/** A complete range of owner-authorized notifications; excluded private inputs are not observed. */
 export const InputWindowSchema = z.object({
   purpose: z.enum(['observation', 'memory']),
   fromInput: z.number().int().nonnegative(), throughInput: z.number().int().nonnegative(),

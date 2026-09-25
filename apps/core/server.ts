@@ -1,3 +1,4 @@
+import { registerSourceRoutes } from './source-routes.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -93,6 +94,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   app.post('/v1/model-profiles',async req=>{principal(req,true,true);return service.putModelProfile(req.body);});
   app.post('/v1/model-profiles/:profile/retry',async req=>{principal(req,true,true);const {profile}=z.object({profile:Slug}).parse(req.params);return service.retryProvider(profile,key(req));});
   registerOperationsRoutes(app,service,(req,write=false)=>{ principal(req,write,true); });
+  registerSourceRoutes(app,service,(req,write=false)=>{ principal(req,write,true); });
   registerMembershipRoutes(app,service,(req,write=false,operator=false)=>{ principal(req,write,operator); });
   app.get('/v1/characters',async req=>{
     const p=principal(req);return service.characters().map(c=>p.role==='operator'?c:{schemaVersion:c.schemaVersion,id:c.id,version:c.version,name:c.name,presentationRef:c.presentationRef});

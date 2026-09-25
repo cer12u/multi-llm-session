@@ -9,7 +9,7 @@ function preview(input:Context):Context {
     scope:'selected-input-only',historyTruncated:context.historyTruncated,
     messages:unique([...context.messages,...context.delta,...(context.retrieved??[]).flatMap(r=>r.messages)]
       .map(m=>({kind:'message' as const,id:m.id,version:m.revision}))),
-    sources:unique(context.sources.map(s=>({kind:'source' as const,id:s.id,version:s.fetchedAt})))};
+    sources:unique(context.sources.map(s=>({kind:'source' as const,id:s.id,version:s.version??s.fetchedAt})))};
   return context;
 }
 /** Selection headroom only; the final request still uses the original authorized limits.

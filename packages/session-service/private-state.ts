@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { ownerSource } from './source-access.js';
 import {
   ensure, PrivateStateSchema, StatePatchSchema,
   type Context, type EvidenceRef, type ObservationManifest, type PrivateState, type StatePatch,
@@ -42,7 +43,7 @@ export class PrivateStates {
     const { observation: _ignored, ...input } = context;
     const messages = distinct([...input.messages, ...input.delta, ...(input.retrieved ?? []).flatMap(r => r.messages)]
       .map(m => ({ kind: 'message' as const, id: m.id, version: m.revision })));
-    const sources = distinct(input.sources.map(s => ({ kind: 'source' as const, id: s.id, version: s.fetchedAt })));
+    const sources = distinct(input.sources.map(s => ({ kind: 'source' as const, id: s.id, version: s.version??s.fetchedAt })));
     return { id: createHash('sha256').update(JSON.stringify(input)).digest('hex'), targetRevision: input.revision,
       trigger: input.trigger, scope: 'selected-input-only', historyTruncated: input.historyTruncated, messages, sources };
   }
@@ -80,8 +81,8 @@ export class PrivateStates {
             const source = this.store.get<{ session_id: string; revision: number; deleted: number }>('SELECT session_id,revision,deleted FROM messages WHERE id=?', ref.id);
             ensure(source?.session_id === run.session_id && !source.deleted && source.revision === ref.version, 422, 'STALE_STATE_EVIDENCE');
           } else {
-            const source = this.store.get<{ session_id: string; fetched_at: number }>('SELECT session_id,fetched_at FROM source_items WHERE id=?', ref.id);
-            ensure(source?.session_id === run.session_id && source.fetched_at === ref.version, 422, 'STALE_STATE_EVIDENCE');
+            const source = ownerSource(this.store,run.session_id,run.agent_id,ref.id);
+            ensure(source.version === ref.version, 422, 'STALE_STATE_EVIDENCE');
           }
         }
         validateQuestionEntry(this.store, run.session_id, entry);
@@ -125,19 +126,21 @@ export class PrivateStates {
     }
   }
   /** Conservatively remove dependent entries; retained journal is private history, not current knowledge. */
-  invalidateMessage(sessionId: string, messageId: string): void {
+  invalidateMessage(sessionId: string, messageId: string): void {this.invalidateEvidence(sessionId,messageId,'message');}
+  invalidateSource(sessionId: string, sourceId: string): void {this.invalidateEvidence(sessionId,sourceId,'source');}
+  private invalidateEvidence(sessionId: string, messageId: string,kind:'message'|'source'): void {
     ensure(this.store.db.inTransaction, 500, 'STATE_TRANSACTION_REQUIRED');
     const rows = this.store.all<StateRow>(`SELECT p.* FROM agent_private_states p JOIN agent_instances a ON a.id=p.agent_id
       WHERE a.session_id=?`, sessionId);
     for (const row of rows) {
       const current = this.read(row.agent_id, sessionId);
-      const entries = current.entries.filter(entry => !entry.evidence.some(ref => ref.kind === 'message' && ref.id === messageId));
+      const entries = current.entries.filter(entry => !entry.evidence.some(ref => ref.kind === kind && ref.id === messageId));
       if (entries.length === current.entries.length) continue;
       this.store.run('UPDATE agent_private_states SET entries_json=?,version=version+1,updated_at=? WHERE agent_id=? AND version=?',
         JSON.stringify(entries), this.now(), row.agent_id, current.version);
       this.store.run(`INSERT INTO agent_state_updates(agent_id,run_id,kind,from_version,to_version,observation_json,patch_json,before_json,after_json,created_at)
         VALUES(?,NULL,'SOURCE_INVALIDATED',?,?,NULL,?,?,?,?)`, row.agent_id, current.version, current.version + 1,
-        JSON.stringify({ messageId }), JSON.stringify(current.entries), JSON.stringify(entries), this.now());
+        JSON.stringify(kind==='message'?{messageId}:{sourceId:messageId}), JSON.stringify(current.entries), JSON.stringify(entries), this.now());
     }
   }
 }

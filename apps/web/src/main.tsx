@@ -10,6 +10,7 @@ import { PersistentComposer, useDurableDrafts } from './persistent-composer.js';
 import './drafts.css';
 import { CharacterManager } from './character-manager.js';
 import { ProviderManager } from './provider-manager.js';
+import { SourceManager } from './source-manager.js';
 import { OperationsPanel } from './operations-panel.js';
 import './style.css';
 
@@ -31,7 +32,7 @@ function App() {
   const [, renderArchive] = useState(0);
   const archives = useRef(new Map<string, ArchiveSession>());
   const initialLink = useRef({ session: new URLSearchParams(location.search).get('session'), message: new URLSearchParams(location.search).get('message'), used: false });
-  const [sourceTitle, setSourceTitle] = useState(''), [sourceText, setSourceText] = useState(''), [settingsText, setSettingsText] = useState('');
+  const [settingsText, setSettingsText] = useState('');
   const [diagnostic, setDiagnostic] = useState<unknown>(null), [connection, setConnection] = useState('接続準備中'), [saving, setSaving] = useState(false), [deleting, setDeleting] = useState<PublicMessage | null>(null);
   const selectedRef = useRef(selected); selectedRef.current = selected;
   const authRef = useRef(auth); authRef.current = auth;
@@ -103,7 +104,7 @@ function App() {
     selectedRef.current = id; currentSnapshot.current = null;
     const url = new URL(location.href); if (url.searchParams.get('session') !== id) url.searchParams.delete('message');
     url.searchParams.set('session', id); history.replaceState(null, '', url);
-    setSelected(id); setSnapshot(null); setPanel(null); setThreadId(null); setJumpId(null); setSearch(''); archiveFor(id).changeQuery(); setSourceTitle(''); setSourceText(''); setDiagnostic(null); setSidebarOpen(false);
+    setSelected(id); setSnapshot(null); setPanel(null); setThreadId(null); setJumpId(null); setSearch(''); archiveFor(id).changeQuery(); setDiagnostic(null); setSidebarOpen(false);
   }
   async function refreshCharacters() {
     const epoch = authEpoch.current;
@@ -213,7 +214,7 @@ function App() {
           </>}
           {panel === 'settings' && <><div className="session-facts"><span>実行状態</span><strong>{lifecycleLabels[session.lifecycle]}</strong><span>推論呼び出し</span><strong>{session.calls} / {session.settings.maxCalls}</strong><span>Agentの発言</span><strong>{session.botMessages} / {session.settings.maxMessages}</strong><span>履歴 revision</span><strong>{session.revision}</strong></div>{operator && <><div className="panel-actions"><button onClick={() => openPanel('source')}>資料を共有</button><button onClick={() => run(exportSession)}>会話を出力</button><button onClick={() => openPanel('diagnostics')}>診断</button></div><details><summary>実行上限・待機時間の詳細設定</summary><p className="muted">開始前または一時停止中だけ変更できます。</p><label className="sr-only" htmlFor="execution-settings">実行設定JSON</label><textarea id="execution-settings" className="settings-editor" value={settingsText} onChange={event => setSettingsText(event.target.value)} /><button disabled={!['DRAFT', 'PAUSED'].includes(session.lifecycle)} onClick={() => run(async () => { await api(`/v1/sessions/${session.id}/settings`, JSON.parse(settingsText)); await refresh(session.id); })}>設定を保存</button></details>{session.lifecycle !== 'ENDED' && <button className="danger-button end-session" onClick={() => setModal('end')}>セッションを終了</button>}</>}<p className="muted">模擬モデルのテスト結果は、実LLM同士の任意会話が成立したことを証明しません。</p></>}
           {panel === 'diagnostics' && operator && <><OperationsPanel key={session.id} sessionId={session.id} api={api} refresh={() => refresh(session.id)} /><details><summary>内部実行記録（管理者限定）</summary><p className="muted">通常の会話表示や他のAgentには未投稿候補を配信しません。</p><pre>{JSON.stringify(diagnostic, null, 2)}</pre></details></>}
-          {panel === 'source' && operator && <form onSubmit={event => { event.preventDefault(); const id = session.id; run(async () => { await api(`/v1/sessions/${id}/sources`, { title: sourceTitle, text: sourceText }); if (selectedRef.current === id) { setSourceTitle(''); setSourceText(''); setPanel(null); } }); }}><p className="muted">資料は会話の参考情報として渡します。投入しても発言は強制されません。</p><label>資料名<input value={sourceTitle} onChange={event => setSourceTitle(event.target.value)} required maxLength={300} /></label><label>本文<textarea className="source-editor" value={sourceText} onChange={event => setSourceText(event.target.value)} required maxLength={20000} /></label><button className="primary" disabled={session.lifecycle === 'ENDED'}>資料を追加</button></form>}
+          {panel === 'source' && operator && <SourceManager key={session.id} session={session} agents={snapshot.agents} api={api} />}
         </div>}
       </aside>}
       </div>

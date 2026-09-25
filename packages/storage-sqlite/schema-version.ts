@@ -1,2 +1,2 @@
-/** Bump together with additive migrations and their populated-database recovery tests. */
-export const CURRENT_SCHEMA_VERSION = 7;
+/** Bump together with additive migrations and populated-data recovery tests. */
+export const CURRENT_SCHEMA_VERSION=8;

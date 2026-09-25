@@ -1,4 +1,6 @@
 import { z } from 'zod';
+export * from './source.js';
+import type { SourceChunk } from './source.js';
 import { StatePatchSchema, type PrivateState, type ObservationManifest } from './agent-state.js';
 export * from './agent-state.js';
 import type { InputWindow, InputProgress, InputSelection } from './input-window.js';
@@ -160,15 +162,11 @@ export type Context = {
   retrieved?: RetrievalResult[];
   memories: MemoryNote[];
   questions: QuestionHint[];
-  sources: { id: string; title: string; text: string; url: string | null; publishedAt: string | null; fetchedAt: number }[];
+  sources: { id: string; title: string; text: string; url: string | null; publishedAt: string | null; fetchedAt: number; version?:number; offset?:number; totalChars?:number; nextCursor?:string|null }[];
   candidate: { id: string; version: number; intent: Intent; text: string | null; reviewedRevision: number } | null;
 };
 export type ClaimedRun = { id: string; token: string; kind: RunKind; workerEpoch: number; sessionEpoch: number;
   leaseMs: number; timeoutMs: number; contextChars: number; profile: ModelProfile; context: Context };
-export const SourceSchema = z.object({
-  title: z.string().trim().min(1).max(300), text: z.string().trim().min(1).max(20000),
-  url: z.string().url().nullable().default(null), publishedAt: z.string().datetime().nullable().default(null),
-}).strict();
 
 export class AppError extends Error {
   constructor(public status: number, public code: string, message = code) { super(message); }
@@ -178,7 +176,7 @@ export function ensure(condition: unknown, status: number, code: string): assert
 }
 
 export const LookupRequestSchema = z.object({
-  kind: z.enum(['messages', 'memories', 'message']), query: z.string().trim().min(1).max(200),
+  kind: z.enum(['messages', 'memories', 'message', 'source']), query: z.string().trim().min(1).max(200),
   cursor: z.string().max(2048).nullable().default(null),
 }).strict();
 export const LookupSchema = z.object({ decision: z.literal('LOOKUP'), requests: z.array(LookupRequestSchema).min(1).max(3) }).strict();
@@ -190,4 +188,4 @@ export const WireOutputSchemas = {
 };
 export type MemoryNote = { id: string; text: string; sourceMessageIds: string[]; provenance?:MemoryProvenance };
 export type Page<T> = { items: T[]; nextCursor: string | null; highWater: number };
-export type RetrievalResult = { request: LookupRequest; messages: PublicMessage[]; memories: MemoryNote[]; nextCursor: string | null };
+export type RetrievalResult = { request: LookupRequest; messages: PublicMessage[]; memories: MemoryNote[]; sources?: SourceChunk[]; nextCursor: string | null };
