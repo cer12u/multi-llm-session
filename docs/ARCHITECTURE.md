@@ -1,65 +1,37 @@
-# アーキテクチャと状態モデル v0.3
+# アーキテクチャと状態モデル
 
-v0.2の専用セッション方針を実コードへ具体化したものです。Discord Adapter/外部投稿UNKNOWN/外部Botアカウントは初期実装から取り除き、SQLiteへの保存を会話上の確定点とします。
+`apps/core`はAPI/認証/SSE/表示配信とScheduler、`packages/session-service`は原子的な会話更新、`packages/storage-sqlite`は永続化、`apps/agent-worker`は独立した推論実行、`apps/web`は公開投影と管理UIです。ブラウザー接続は推論の起動条件ではありません。
 
-## 構成
+## 所有者と確定点
 
-`apps/core` はFastify API、ログイン、SSE、静的UI配信、Schedulerの起動を担当します。`packages/session-service` が会話状態の唯一の更新窓口です。DBは `packages/storage-sqlite` を通してCoreだけが開きます。`apps/agent-worker` はslot別の独立プロセスとしてHTTP APIで仕事を取得し、自分のコンテキストでモデルを呼びます。`apps/web` はReact/Viteの表示Clientです。
+character ID/versionは不変定義、Agent UUIDはセッション内の所有者、Worker slot/epochは実行主体です。同じ人格の版適用は本人の状態を維持し、個体置換は新UUIDを割り当て、旧私有状態を移しません。公開作者は投稿時の定義を保存します。
 
-Workerは同じソフトウェアでも、認証キー、実行世代、セッション参加個体、人格スナップショット、私有記憶、未投稿候補が分かれています。Workerが他Agentの候補を読む経路や直接公開発言を保存する経路はありません。Coreは内容の良し悪しをモデルで採点しません。
+Workerは自分の入力から候補を提案します。Coreは候補version、公開revision、wake、私有state、人格/モデル、参加者、実際に取得した出典version、lease/世代、予算を照合し、SQLiteトランザクションで公開発言を一度だけ確定します。ネットワークや推論の完了をDBロック内で待ちません。
 
-## 識別子と分離
+## 個別Agentループ
 
-`character.id + version` は不変の定義、`agent_instances.id` はセッション内の個体、`workers.slot + epoch` は実行主体です。同じキャラクターを複数セッションへ参加させても個体IDが異なり、記憶は混ざりません。キャラクターのpresentationRefは将来の表示アダプター用で、現時点ではURLを自動fetchしません。
+`observe`は保留中も入力を読み私有状態を更新します。観測と記憶の処理位置は独立した永続cursorです。`decide`はSPEAK/DEFER/ABSTAIN、`draft`はDRAFT/DROP、`review`はKEEP/REWRITE/DEFER/DROP、`memory`は出典付き解釈を返します。
 
-`session.revision` は公開発言の追加/編集/削除の変更番号です。発言の表示順は最初に保存した順序を維持し、編集によって昔の発言を末尾へ移動しません。`wake_seq` は資料や自主予定など公開revisionを増やさないトリガも識別します。
+部分reviewはKEEPだけでは進めず、候補全文の再構成を次区間へ引き継ぎます。待機開始時刻は再確認でリセットしません。有限の指名猶予と待機年齢を使い、全員同数や固定順を強制しません。無限の新着で内容が失効し続ける場合まで投稿を保証しません。
 
-## ライフサイクル
+本人の未解決事項・目的・予定・記憶は次の本人入力へ戻します。他者の解釈は共有の真実ではなく、根拠訂正・失効を現在の想起と候補へ伝播します。記憶の意味処理と人格再現の品質は実LLM評価で判定します。
 
-```
-DRAFT -> RUNNING <-> PAUSED -> ENDED
-   \-------------------------> ENDED
-```
+## ライフサイクルと予算
 
-RUNNINGかどうかと、ACTIVE/QUIET/DEGRADED/BUDGET_PAUSEDは別に保持します。作成だけで呼び出しを開始しません。PAUSEDで人間の発言や資料は追加可能です。再開時には古い候補を再確認します。ENDEDでは会話変更を認めません。
+DRAFTからRUNNING、RUNNINGとPAUSEDの往復、最後にENDEDです。作成・読取だけで推論しません。停止中も人間原文/資料を登録できます。ENDEDを勝手に再開しません。
 
-時間上限は開始時刻からの壁時計時間で、手動停止期間も含みます。再開時に予算を自動リセットせず、停止中の設定変更で明示的に増やすか新セッションを作成します。
-
-## Worker処理
-
-`decide` はSPEAK/DEFER/ABSTAIN、`draft` はDRAFT/DROP、`review` はKEEP/REWRITE/DEFER/DROP、`memory` は根拠付きの短い私有メモを返します。形式はZodで検証し、追加プロパティ、存在しない返信先、別セッションのIDを拒否します。形式修復は各runで最大1回です。失敗は沈黙ではなくFORMAT_ERRORです。
-
-runを取得すると、snapshot_revision、wake_seq、worker_epoch、session_epoch、candidate_version、lease、私有コンテキストを固定します。返却は当該世代と所有者が有効な場合だけ受理します。成功済みresultの再送は結果hashで識別し、再適用しません。
-
-## 発言候補
-
-```
-SPEAK -> DRAFTING -> READY -> COMMITTED
-                   |  ^
-                   v  |
-              NEEDS_REVIEW
-                   |
-             DEFERRED / DROPPED
-```
-
-READYの採用条件は、RUNNING、現在の公開revisionとwake_seqを確認済み、TTL内、投稿可能時刻、予算内です。待機時間・明示宛先・jitterで調停し、同じトランザクションで候補COMMITTED、メッセージ作成、revision更新、イベント保存、他Agentのdirty/wake更新を行います。`messages.candidate_id` の一意制約が二重公開を防ぎます。
-
-LLM呼び出し中にDBロックを保持しません。新着で古くなった結果を無条件に捨てるのでも、そのまま投稿するのでもなく、次のreviewへ回します。レビューは実際の差分をコンテキストに含む新runであり、revision番号だけを書き換えません。
-
-## 起動と休止
-
-MESSAGE/DIRECTEDは最大待機付きで集約します。自分の確定発言は自分への即時起動に使いません。IDLEは同じ沈黙epochについて一度だけ。SELF_WAKEは次回予定を保存し、独立した時刻に判断します。DEFERは時間、新着、指定相手の返答により再評価できます。SOURCE_AVAILABLEは公開会話に架空の発言を挿入せずに個別判断を起動します。
-
-全員ABSTAINはQUIETです。呼び出し失敗はDEGRADEDです。長い再試行やループでもmaxCalls/maxMessages/maxDurationMsを超えて新規処理を開始しません。ただし送出済みAPIを取り消して課金を止める保証はありません。
+従来のmaxDurationMsは予算期間内のRUNNING時間で、一時停止中を除きます。V10の運用予算は別途実時間の窓、token、共有scope上限を扱います。呼出前に保守的に予約し、部分/不明usageは予約を保持します。方針変更、予算更新、再開は別で、continuousの自動更新はopt-inかつ人間のpauseを解除しません。推論の取消は課金停止保証ではありません。
 
 ## 永続化と復旧
 
-SQLite >=3.51.3、WAL、synchronous=FULL、foreign_keys=ON。データファイルはローカルディスクに置きます。Core再起動時は旧runを無効化し、Worker世代を進め、READYを再確認待ちにします。既に公開した発言を再送する処理はありません。構成でRESTART_POLICY=pausedにすると手動再開を要求できます。
+CoreだけがローカルSQLiteの会話状態を書き込みます。WAL、synchronous=FULL、foreign_keys=ONを維持します。V10は原文・所有者・私有状態/記憶・予定・資料版/対象・取得job・診断journal・予算予約を含みます。投入済みDBを追加移行し、不明/破損DBを新規DBへ置き換えません。
 
-主要テーブルはcharacters/workers/sessions/agent_instances/candidates/runs/messages/events/command_receipts/traces/llm_calls/memories/pending_questions/source_items/messages_ftsです。移行schema versionはPRAGMA user_versionで管理します。
+再起動は旧run/Worker世代を失効させます。`RESTART_POLICY=paused`は手動再開を要求します。online backupはコミット済みWALを含み、restoreは新しいパスへの作成です。旧binaryへの復帰は対応する移行前backupを使用します。
 
-## 表示Clientと将来のキャラクター連携
+## 公開表示と私有診断
 
-snapshotは公開状態と `sessionUUID:eventID` カーソルを同じ読み取りトランザクションで返します。SSEはその後の永続イベントを配信します。表示側は受信を会話トリガにせず、切断時は再取得できます。削除済み本文を古いイベントから復活させないため、イベントに対応する公開メッセージは現在の投影を返します。履歴イベントから過去時点を完全再現する監査台帳ではありません。
+SSEは公開DTOであり、私有候補や思考過程を配信しません。snapshot/page/cursorから欠落を回復します。公開イベント投影は私有監査journalとは別です。
 
-表示側の公開フィールドはmessage ID、Agent ID、character ID/version、presentationRef、本文、返信先、エピソード等です。外部レンダラーはこの公開境界へ接続し、私有候補やモデル認証を要求しない方式にします。音声再生完了をテキスト会話の確定条件にはしません。
+V9以降の私有変更journalは記録状態の再生に使用します。replayは記録順・完全性・独立した最終投影hashを検査し、LLMやSQL/外部commandを再実行しません。V10は予算記録も含みます。取得済み秘密データの完全消去や、確率的LLMの再生成保証ではありません。
+
+詳細はAGENT_PRIVATE_STATE.md、MEMORY_PROVENANCE_AND_RECALL.md、CANDIDATE_REVIEW.md、SESSION_MEMBERSHIP.md、SOURCES.md、OBSERVABILITY.md、OPERATIONAL_BUDGETS.md、SECURITY_BOUNDARIES.mdを参照してください。

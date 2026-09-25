@@ -1,72 +1,54 @@
 # 運用・復旧・安全性
 
-## 配置前提
+## 配置と認証
 
-初期版は単一Core・単一DB・非公開ラボ向けです。Node.js 24.20.0、ローカルディスク、Docker利用時はLinuxコンテナを前提にしています。公開インターネットへポートを開けないでください。初期Composeは127.0.0.1だけに公開します。別PCから操作する場合は、SSHポート転送または認証されたリバースプロキシを使い、PUBLIC_ORIGIN/Host/HTTPS cookieと整合させてください。
+単一Core/ローカルSQLite/非公開ラボを対象にします。Node.js24.20.0とlockfileを使います。初期Composeは127.0.0.1へだけ公開します。別PCの操作はSSH転送または認証されたproxyを使い、PUBLIC_ORIGIN/Host/Origin/HTTPS cookieを整合させます。
 
-## ログインと鍵
+`npm run dev`は不足する内部鍵を生成し、管理者ログイントークンをターミナルへ表示します。Composeは`node deploy/init-env.mjs`の新規.envを使用します。鍵や.envをコミットしません。モデル鍵は専用の環境変数/secret-file参照で配置し、Workerには本人の内部tokenと必要なモデルbindingだけを渡します。DBはCore専用です。
 
-`npm run dev` は起動時に足りないローカル鍵を生成し、管理者のログイントークンだけをターミナルへ表示します。固定鍵を維持する場合は安全な環境変数を設定します。Composeは `node deploy/init-env.mjs` が作るchmod600の.envを使用します。既存.envは上書きしません。
+VIEWER_TOKENは単一ラボの共有閲覧用で、個人別ACLではありません。管理者/Workerの鍵と別にします。persona・私有資料・診断・設定操作を閲覧者へ渡しません。
 
-Workerには自分のslot用トークンだけを渡し、peerのWorker鍵、管理者鍵、DBマウントを渡しません。モデルAPIキーは実モデルを使用するWorker環境で管理します。Browserへモデル鍵を返しません。
+## 停止と予算
 
-閲覧トークンが必要な場合はVIEWER_TOKENをCoreへ設定します。24文字以上、管理者/Worker鍵と別の値にしてください。閲覧者はすべての公開セッションを見るラボ用の共有閲覧者であり、個別ユーザーACLではありません。
+pauseは新規runと公開確定を停止し、再開時は古い候補を再確認します。外部送信済みの推論/課金が止まったとは限りません。デフォルトのCore復旧は再開可能状態を回復し、`RESTART_POLICY=paused`なら手動再開を要求します。
 
-## 停止・復旧
-
-UIの一時停止は新規runと新規発言の確定を停止します。外部へ送信済みの推論を取り消せるとは限りません。保留候補は再開時に再確認します。デフォルトのCore再起動ではRUNNINGセッションを復旧し、古いWorker世代とrunを無効化します。勝手に再開したくない環境ではRESTART_POLICY=pausedを指定してください。
-
-ComposeではWorkerごとにrestart policyを持ちます。一体の停止で他Workerを停止させません。開発用supervisorも一体の退出だけではCoreや他Agentを止めませんが、そのWorkerの自動再生成は行わないため、全体再起動またはComposeで置き換えます。
-
-時間予算はactive時間を計測し、一時停止時間と区別します。停止中の `POST /v1/sessions/:id/budget` は予算窓だけを更新し、累計呼出し・原文・私有状態を消しません。更新だけで会話を再開しません。予算の常用窓・実消費の詳細管理は#29です。操作UI/CLIの対応範囲は対象コミットの仕様を確認してください。
+時間上限はRUNNING時間と実時間の予算窓を分けます。方針保存、明示的な予算更新、resumeは別操作です。履歴・私有状態・累計消費を消さず、continuousの自動更新も明示opt-inだけです。人間がpauseした状態を解除しません。OPERATIONAL_BUDGETS.mdを参照してください。
 
 ## CLI
 
-```bash
-npm run build
-# CORE_URL と ADMIN_TOKEN を安全な環境変数として設定
-npm run cli -- list
-npm run cli -- status SESSION_ID
-npm run cli -- pause SESSION_ID
-npm run cli -- resume SESSION_ID
-npm run cli -- say SESSION_ID '話題を投入'
-npm run cli -- search SESSION_ID '検索語'
-npm run cli -- export SESSION_ID
-npm run cli -- source SESSION_ID source.json
-```
+CORE_URL/ADMIN_TOKENを安全に設定した後、`npm run cli -- ...`を使います。
 
-終了済みセッションは閲覧・検索・exportのみです。UIの診断画面ではprocessed/dirty revision、wake世代、候補状態、再確認、run、エラー、予算を確認します。思考中・沈黙・待機・エラーを区別してください。長い非公開推論の保存は要求していません。
+| 用途 | コマンド |
+|---|---|
+| 会話 | `list`、`create FILE`、`status SESSION`、`start/pause/resume/end SESSION`、`say SESSION TEXT` |
+| 原文 | `original SESSION MESSAGE`、`history SESSION [CURSOR]`、`thread SESSION MESSAGE [CURSOR]`、`search-page SESSION QUERY [CURSOR]` |
+| 人格 | `characters`、`character-validate FILE`、`character-import FILE`、`character-versions ID`、`character-get/character-export ID VERSION` |
+| Provider | `profiles`、`profile-versions ID`、`profile-save FILE`、`retry-provider ID VERSION`、`retry-agent SESSION AGENT` |
+| 継続 | `members/episodes SESSION`、`members-apply/clone SESSION FILE`、`usage SESSION`、`budget-policy SESSION FILE`、`budget SESSION` |
+| 資料 | `source SESSION FILE`、`sources/feeds SESSION`、`source-get/source-versions SESSION SOURCE`、`source-update SESSION SOURCE FILE`、`feed-save SESSION FILE`、`feed-retry SESSION FEED` |
+| 記録 | `transcript SESSION`、`diagnostic-runs SESSION`、`diagnostic-run SESSION RUN`、`diagnostic-export SESSION PRIVATE.ndjson`、`replay PRIVATE.ndjson PRIVATE.json` |
 
-## DBとバックアップ
+入力FILEの構造は各機能の契約に従います。cursorは応答のnextCursorをそのまま渡します。管理者CLIの出力には許可されたpersona/原文が含まれます。stdoutや私有ファイルを公開ログへ無差別に保存しないでください。
 
-SQLiteには公開会話だけでなく、私有runコンテキスト・候補・メモも含まれます。公開artifactへDBを置かないでください。運転中の状態を書き込むのはCoreだけです。DBをNFS上に置かないでください。
-
-専用CLIの手順、対応するV1〜V5、失敗時の扱い、保持方針と試験対応は [STORAGE_RECOVERY.md](STORAGE_RECOVERY.md) を参照してください。
+## DBとbackup
 
 ```sh
 node dist/apps/cli/storage.js inspect data/conversation.sqlite
-# 新規の出力名を使う。既存backupを上書きしない。
-node dist/apps/cli/storage.js backup data/conversation.sqlite backups/verified-session.sqlite
-node dist/apps/cli/storage.js restore backups/verified-session.sqlite restored/session.sqlite
+node dist/apps/cli/storage.js backup data/conversation.sqlite backups/new.sqlite
+node dist/apps/cli/storage.js restore backups/new.sqlite restored/session.sqlite
 node dist/apps/cli/storage.js inspect restored/session.sqlite
-# Core/Workerを停止し、backupを確保した後だけ実行する。
+# サービス停止とbackup確保の後だけ
 node dist/apps/cli/storage.js maintain restored/session.sqlite --offline
 ```
 
-backupはSQLiteのオンラインAPIからコミット済みWALを含む整合snapshotを作ります。稼働中の.sqlite本体だけをコピーしてはいけません。出力は検証後に新規ファイルとして公開し、別の既存DBやbackupを置換しません。restoreも別ディレクトリへの新規作成です。切替時はCore/Workerを停止し、旧WALを混入させず、DB_PATHと実行ユーザーの所有権を合わせてください。最初はRESTART_POLICY=pausedで検査する構成を推奨します。
+現行schemaはV10です。online backupはSQLite APIからWAL込みの整合snapshotを作り、検証して新規ファイルへ保存します。稼働中の.sqlite本体だけをコピーしません。restoreも新しいパスへ作成し、既存DBを上書きしません。切替はCore/Worker停止後に行い、旧WALを混ぜず、所有権/DB_PATHを合わせます。
 
-旧schema versionを無理に変更しません。不明／不完全／破損したDBや移行失敗を初期DBへ黙って置換しません。新binaryで移行したDBを旧binaryへ戻すには、対応する移行前backupを別パスへ復元します。重要データ投入前に別の検証ボリュームで手順を実施してください。オンラインの書込中backup、別ディレクトリ復元、実Core/Worker停止、索引再構築・VACUUM・容量不足は合成データのCIで検査しています。実機電源断や全filesystemの保証とは別です。
+DBには私有状態/候補/入力/記憶が含まれます。NFSや公開artifactへ置きません。schema番号を書き換えず、不完全DBを新規DBで隠しません。旧binaryへのrollbackは対応する移行前backupを使います。STORAGE_RECOVERY.mdと各移行仕様を参照してください。
 
-## データ保持
+## 測定・保持
 
-最近のコンテキストはboundedですが、監査用events/traces/runsの自動削除は未実装です。長期間使用する場合、inspectの行数・page/file/WAL容量とディスク空きを監視してください。原文、記憶、状態journal、再送receipt、予定は入力制限を理由に消去しません。backupの保存先とrotationは運用者が管理し、別の検証済み復元元なしに唯一のbackupを削除しないでください。
+`node dist/apps/cli/soak.js 600 artifacts/operational-soak.json`は外部モデルを呼ばない実Core/3 Worker/HTTP/一時DBの合成負荷です。条件・上限・結果はOPERATIONAL_SOAK.mdと対象PR/CI成果物で確認します。600秒を24時間保証にしません。
 
-公開発言の削除は表示・検索からの削除であり、過去のモデル提示コンテキストやバックアップの完全消去保証ではありません。個人データの完全消去には別の運用設計が必要です。#9/#19で今後追加される意味・session契約は、その実装と同時に移行・復元テストへ追加します。現行V5の復元試験を未来の未実装データの検証と混同しません。
+原文と監査journalは入力上限のために消去しません。DB/WAL容量と空き容量を監視し、backup rotationは運用者が管理します。公開削除・配信取消・logoutは過去のrecordingやbackupの完全消去ではありません。
 
-## CIの安全性
-
-通常CIはpull_requestとmainへのpushだけで起動し、contents:read、Secretなし、モデルはmockです。checkout/setup-node/upload-artifactは固定SHAです。公開PRのコードへLLMキーを渡すpull_request_target構成は使いません。
-
-依存インストール時の実行スクリプトはpackage.jsonのallowScriptsで承認済みのbetter-sqlite3とesbuildの固定版だけを指定しています。Node/Docker base imageはパッチ版で指定します。外部レジストリの将来変更まで完全に固定するには、運用側でimage digestも記録・固定してください。
-
-通常CIにコードを書き換える権限を渡しません。各stageの終了コードを保持し、診断専用jobの成功をverify失敗の代替にしません。mainマージはユーザーの明示許可に従い、検証対象headを指定します。registry公開と常設サーバーへのdeployは別の許可が必要です。
+通常CIはread-only/合成データです。実モデルは別の承認SHA/設定/上限と明示実行を要求し、ライブworkflowをPRから自動起動しません。registry公開と常設deployは別の承認事項です。
