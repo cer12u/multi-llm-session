@@ -99,7 +99,7 @@ try{
     if(Date.now()>=nextInput){await post('SOAK_TOPIC_'+sequence++);nextInput=Date.now()+limits.inputIntervalMs;}
     if(Date.now()>=nextSample){
       const u=await api<Usage>(rootPath+'/usage');assert.equal(u.lifecycle,'RUNNING','SOAK_UNEXPECTED_STOP');if(u.window)windows.add(u.window.id);
-      const processes=cluster!.children.map(c=>processSample(c.pid));assert.equal(processes.length,4);
+      const processes:ReturnType<typeof processSample>[]=cluster!.children.map(c=>processSample(c.pid));assert.equal(processes.length,4);
       if(process.platform==='linux')for(const p of processes){assert(p.rssKiB!==null&&p.rssKiB<=limits.maxRssKiB,'SOAK_RSS_LIMIT');assert(p.sockets!==null&&p.sockets<=limits.maxSocketsPerProcess,'SOAK_SOCKET_LIMIT');}
       assert(u.runtime.databaseBytes<=limits.maxDatabaseBytes,'SOAK_DATABASE_LIMIT');
       samples.push({elapsedMs:Date.now()-started,databaseBytes:u.runtime.databaseBytes,walBytes:existsSync(dbPath+'-wal')?statSync(dbPath+'-wal').size:0,agents:u.runtime.agents,processes,calls:u.calls.reduce((n,c)=>n+c.calls,0),posts:u.publicPosts});nextSample=Date.now()+5000;
@@ -111,7 +111,7 @@ try{
   assert(restarted&&faultRecovered&&faults===1,'SOAK_FAULT_PATH_MISSING');assert(windows.size>=2,'SOAK_RENEWAL_NOT_OBSERVED');assert.equal(ownerRequests.size,3,'SOAK_OWNER_STARVATION');
   assert.deepEqual((await api<Snapshot>(rootPath+'/snapshot')).agents.map(a=>a.id),firstOwners);
   const originals:PublicMessage[]=[];let cursor:string|null=null;
-  do{const page=await api<Page<PublicMessage>>(rootPath+'/history?limit=200'+(cursor?'&cursor='+encodeURIComponent(cursor):''));originals.push(...page.items);cursor=page.nextCursor;}while(cursor);
+  do{const page:Page<PublicMessage>=await api<Page<PublicMessage>>(rootPath+'/history?limit=200'+(cursor?'&cursor='+encodeURIComponent(cursor):''));originals.push(...page.items);cursor=page.nextCursor;}while(cursor);
   assert.equal(new Set(originals.map(m=>m.id)).size,originals.length,'SOAK_DUPLICATE_PUBLICATION');
   assert.deepEqual(new Set(originals.filter(m=>m.authorId===null).map(m=>m.id)),new Set(originalIds),'SOAK_ORIGINAL_LOSS');originalsVerified=true;
   assert((await api<any[]>(rootPath+'/episodes')).length>=2,'SOAK_EPISODE_BOUNDARY_MISSING');

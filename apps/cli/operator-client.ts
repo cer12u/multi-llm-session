@@ -7,9 +7,19 @@ export async function operatorCommand(args:string[],env:NodeJS.ProcessEnv=proces
   const [action,id,arg,extra]=args,base=env.CORE_URL??'http://127.0.0.1:3000',token=env.ADMIN_TOKEN;
   if(!token)throw new Error('ADMIN_TOKEN is required');
   const session=()=>encodeURIComponent(Id.parse(id)),profile=()=>encodeURIComponent(Slug.parse(id));
+  const version=()=>{if(!/^[1-9][0-9]*$/.test(arg??'')||!Number.isSafeInteger(Number(arg)))throw new Error('Positive VERSION required');return arg;};
+  const pageQuery=(cursor?:string)=>{if(cursor&&cursor.length>2048)throw new Error('Cursor too long');return '?limit=100'+(cursor?'&cursor='+encodeURIComponent(cursor):'');};
   let path:string,method='GET',body:unknown;
   switch(action){
     case 'list':path='/v1/sessions';break;
+    case 'characters':path='/v1/characters';break;
+    case 'character-validate':case 'character-import':path='/v1/characters/'+action.slice('character-'.length);method='POST';body=JSON.parse(readFileSync(id,'utf8'));break;
+    case 'character-versions':path=`/v1/characters/${profile()}/versions`;break;
+    case 'character-get':case 'character-export':path=`/v1/characters/${profile()}/versions/${version()}`+(action==='character-export'?'/export':'');break;
+    case 'history':path=`/v1/sessions/${session()}/history`+pageQuery(arg);break;
+    case 'original':path=`/v1/sessions/${session()}/archive/${encodeURIComponent(Id.parse(arg))}`;break;
+    case 'thread':path=`/v1/sessions/${session()}/threads/${encodeURIComponent(Id.parse(arg))}`+pageQuery(extra);break;
+    case 'search-page':path=`/v1/sessions/${session()}/search-page`+pageQuery(extra)+'&q='+encodeURIComponent(arg??'');break;
     case 'source-configurations':path='/v1/source-configurations';break;
     case 'sources':case 'feeds':path=`/v1/sessions/${session()}/${action}`;break;
     case 'source-get':path=`/v1/sessions/${session()}/sources/${encodeURIComponent(Id.parse(arg))}`;break;
@@ -42,7 +52,7 @@ export async function operatorCommand(args:string[],env:NodeJS.ProcessEnv=proces
     case 'say':path=`/v1/sessions/${session()}/messages`;method='POST';body={text:arg};break;
     case 'source':path=`/v1/sessions/${session()}/sources`;method='POST';body=JSON.parse(readFileSync(arg,'utf8'));break;
     case 'search':path=`/v1/sessions/${session()}/search?q=${encodeURIComponent(arg)}`;break;
-    default:throw new Error('Usage: usage SESSION | budget-policy SESSION FILE | transcript/diagnostic-runs SESSION | diagnostic-run SESSION RUN | source-configurations | sources/feeds SESSION | source-get/source-versions/feed-retry SESSION SOURCE_OR_FEED_UUID | source-update SESSION SOURCE_UUID FILE | feed-save SESSION FILE | list | create FILE | profiles | profile-versions PROFILE | profile-save FILE | members/episodes/operations/status/start/pause/resume/end/export/budget SESSION | members-apply/clone SESSION FILE | retry-agent SESSION AGENT | retry-provider PROFILE VERSION | say/search SESSION TEXT | source SESSION FILE');
+    default:throw new Error('Usage: characters | character-validate/character-import FILE | character-versions ID | character-get/character-export ID VERSION | history SESSION [CURSOR] | original SESSION MESSAGE | thread SESSION MESSAGE [CURSOR] | search-page SESSION QUERY [CURSOR] | usage SESSION | budget-policy SESSION FILE | transcript/diagnostic-runs SESSION | diagnostic-run SESSION RUN | source-configurations | sources/feeds SESSION | source-get/source-versions/feed-retry SESSION SOURCE_OR_FEED_UUID | source-update SESSION SOURCE_UUID FILE | feed-save SESSION FILE | list | create FILE | profiles | profile-versions PROFILE | profile-save FILE | members/episodes/operations/status/start/pause/resume/end/export/budget SESSION | members-apply/clone SESSION FILE | retry-agent SESSION AGENT | retry-provider PROFILE VERSION | say/search SESSION TEXT | source SESSION FILE');
   }
   const response=await fetcher(new URL(path,base),{method,redirect:'error',headers:{authorization:'Bearer '+token,'content-type':'application/json','idempotency-key':env.IDEMPOTENCY_KEY??randomUUID()},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});
   return {ok:response.ok,body:await response.text()};
