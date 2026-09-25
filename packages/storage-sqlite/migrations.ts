@@ -122,7 +122,7 @@ function migrateV4(db: Database.Database): void {
       CREATE TABLE candidate_state_bindings(candidate_id TEXT PRIMARY KEY REFERENCES candidates(id),state_version INTEGER NOT NULL);
       CREATE TABLE memory_input_origins(memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
         run_id TEXT NOT NULL REFERENCES runs(id),evidence_json TEXT NOT NULL);
-      INSERT INTO agent_input_cursors(agent_id) SELECT id,0,0,0,0 FROM agent_instances;
+      INSERT INTO agent_input_cursors(agent_id) SELECT id FROM agent_instances;
       UPDATE runs SET state='CANCELLED' WHERE state='ACTIVE';
       UPDATE llm_calls SET status='ABANDONED' WHERE status='RESERVED';
       UPDATE candidates SET state='NEEDS_REVIEW',reason='INPUT_CURSOR_UPGRADE' WHERE state='READY';
