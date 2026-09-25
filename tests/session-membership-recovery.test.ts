@@ -8,6 +8,7 @@ import {fixture} from './helpers.js';
 import {saveOwnerExperience,selection,replace} from './fixtures/membership.js';
 import {asV6Fixture} from './fixtures/session-v6.js';
 import {Store} from '../packages/storage-sqlite/index.js';
+import {CURRENT_SCHEMA_VERSION} from '../packages/storage-sqlite/schema-version.js';
 import {SessionService} from '../packages/session-service/index.js';
 import {migrateSessions} from '../packages/storage-sqlite/session-migration.js';
 import {backupDatabase,restoreDatabase,inspectDatabase} from '../packages/storage-sqlite/maintenance.js';
@@ -25,7 +26,7 @@ it('R7-MEMBERS-005: populated V6 upgrade preserves owner IDs, row order, origina
     asV6Fixture(f.store.db);expect(f.store.db.pragma('user_version',{simple:true})).toBe(6);
     expect(f.store.get<{sql:string}>("SELECT sql FROM sqlite_master WHERE name='agent_instances'")!.sql).toContain('UNIQUE(session_id,slot)');
     f.close();reopened=new Store(path);
-    expect(inspectDatabase(path).schemaVersion).toBe(7);expect(reopened.db.pragma('foreign_keys',{simple:true})).toBe(1);
+    expect(inspectDatabase(path).schemaVersion).toBe(CURRENT_SCHEMA_VERSION);expect(reopened.db.pragma('foreign_keys',{simple:true})).toBe(1);
     expect(reopened.all('SELECT rowid,id,character_json,profile_json FROM agent_instances ORDER BY rowid')).toEqual(agents);
     for(const table of retained)expect(reopened.all('SELECT * FROM '+table+' ORDER BY rowid'),table).toEqual(before[table]);
     expect(reopened.get<{state:string}>('SELECT state FROM runs WHERE id=?',active.id)!.state).toBe('CANCELLED');
@@ -59,7 +60,7 @@ it('R7-MEMBERS-006: failure after rebuilding the Agent table rolls back all V7 m
   }finally{f.close();rmSync(dir,{recursive:true,force:true});}
 });
 
-it('R7-MEMBERS-007: V7 online backup restores current/retired ownership, journals, authorship and episodes exactly across Core restart',async()=>{
+it('R7-MEMBERS-007: current online backup restores current/retired ownership, journals, authorship and episodes exactly across Core restart',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'membership-restore-')),path=join(dir,'live.sqlite'),f=fixture(3,{memoryEvery:3},path);let restored:Store|undefined;
   try{
     const {owner,original}=saveOwnerExperience(f);f.say('退出前の原文');f.speak(f.claim()!);f.finish(f.claim()!,{decision:'DRAFT',text:'退出者が投稿した記録'});
@@ -69,7 +70,7 @@ it('R7-MEMBERS-007: V7 online backup restores current/retired ownership, journal
     const retained=['agent_instances','agent_private_states','agent_state_updates','memories','memory_metadata','memory_edges','memory_changes','agent_input_cursors','agent_agenda','agent_agenda_bindings','session_member_changes','message_author_snapshots','session_episodes'];
     const before=Object.fromEntries(retained.map(table=>[table,f.store.all('SELECT * FROM '+table+' ORDER BY rowid')]));
     const backup=join(dir,'backup.sqlite'),destination=join(dir,'restored.sqlite');
-    expect((await backupDatabase(path,backup)).schemaVersion).toBe(7);await restoreDatabase(backup,destination);
+    expect((await backupDatabase(path,backup)).schemaVersion).toBe(CURRENT_SCHEMA_VERSION);await restoreDatabase(backup,destination);
     restored=new Store(destination);const service=new SessionService(restored,{...f.config,dbPath:destination},f.now,()=>0);service.recover();
     for(const table of retained)expect(restored.all('SELECT * FROM '+table+' ORDER BY rowid'),table).toEqual(before[table]);
     expect(service.session(f.id).lifecycle).toBe('PAUSED');expect(service.membership(f.id).current.map(r=>r.agent.id)).toEqual(report.current.map(r=>r.agent.id));
