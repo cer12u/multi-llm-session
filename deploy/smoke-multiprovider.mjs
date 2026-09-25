@@ -5,6 +5,7 @@ import { join,resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { generateDeployment } from '../dist/packages/config/deployment.js';
+import { ReplayStream } from '../dist/packages/observability/replay.js';
 
 const root=mkdtempSync(join(tmpdir(),'mls-compose-proof-')),reports=[];
 function shell(args){
@@ -38,6 +39,14 @@ try{
       const response=await fetch(base+path,{method:body===undefined?'GET':'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(5000)});
       assert.equal(response.ok,true,'synthetic Core API '+path+' status '+response.status);return response.json();
     };
+    // Inspection is an administrator grant. An idle/paused Worker is not allowed to read saved private Agents.
+    async function privateMemories(id,agents){
+      const response=await fetch(base+`/v1/sessions/${id}/diagnostic-export`,{headers:{authorization:'Bearer '+admin},signal:AbortSignal.timeout(5000)});
+      assert.equal(response.ok,true,'private synthetic audit');
+      const replay=new ReplayStream();for(const line of (await response.text()).split('\n').filter(Boolean))replay.push(line);
+      const rows=replay.finish().state.find(table=>table.table==='memories').rows;
+      return agents.map(agent=>rows.filter(row=>row.agent_id===agent.id).sort((a,b)=>a.id.localeCompare(b.id)));
+    }
     async function until(check,label){for(let i=0;i<180;i++){try{const value=await check();if(value)return value;}catch{}await sleep(250);}throw new Error('SYNTHETIC_WAIT_FAILED: '+label);}
     try{
       shell([...args,'config','--quiet']);shell([...args,'up','-d','--no-build']);
@@ -45,10 +54,8 @@ try{
       const id=(await api('/v1/sessions',JSON.parse(readFileSync(generated.sessionPath,'utf8')))).id;
       for(let i=0;i<3;i++)await api(`/v1/sessions/${id}/messages`,{text:'synthetic input '+i});
       await api(`/v1/sessions/${id}/start`,{});
-      const tokenFor=i=>readFileSync(compose.secrets['worker-'+i+'-token'].file,'utf8').trim();
       const memories=await until(async()=>{
-        const snapshot=await api(`/v1/sessions/${id}/snapshot`);
-        const notes=await Promise.all(snapshot.agents.map((a,i)=>api(`/v1/worker/agents/${a.id}/memory`,undefined,tokenFor(i))));
+        const snapshot=await api(`/v1/sessions/${id}/snapshot`),notes=await privateMemories(id,snapshot.agents);
         return notes.every(n=>n.length===1)?notes:null;
       },'three independent memory results');
       await api(`/v1/sessions/${id}/pause`,{});
@@ -71,7 +78,7 @@ try{
       const after=await api(`/v1/sessions/${id}/snapshot`);
       assert.equal(after.session.lifecycle,'PAUSED');assert.equal(after.session.calls,before.session.calls);
       assert.deepEqual(after.messages,before.messages);assert.deepEqual(after.agents.map(a=>a.id),before.agents.map(a=>a.id));
-      for(const [i,a] of after.agents.entries())assert.deepEqual(await api(`/v1/worker/agents/${a.id}/memory`,undefined,tokenFor(i)),memories[i]);
+      assert.deepEqual(await privateMemories(id,after.agents),memories);
       if(faultScope){const health=(await api('/v1/model-profiles')).find(p=>p.profile.id==='profile-2').health;assert.equal(health.scope,faultScope.scope);assert.equal(health.failures,faultScope.failures);assert.equal(health.lastError,'RATE_LIMIT');}
       const scopes=(await api('/v1/model-profiles')).map(p=>p.health.scope);assert.equal(new Set(scopes).size,profiles.length);
       reports.push({scenario,workers:3,nonRoot:true,authenticatedRoutes:true,pinnedVersions:true,distinctAgents:3,modelScopes:profiles.length,originalsRetained:after.messages.length,privateMemoriesRetained:3,circuitRetained:!!faultScope,coreRecreated:true,mode:'synthetic-loopback-only'});
