@@ -1,3 +1,4 @@
+import {backupDatabase} from '../../packages/storage-sqlite/maintenance.js';
 import {readFileSync,writeFileSync,mkdirSync,realpathSync,statSync,readdirSync,readlinkSync,existsSync} from 'node:fs';
 import {dirname,resolve,relative,join,sep} from 'node:path';
 import {createServer} from 'node:net';
@@ -25,7 +26,7 @@ async function main(){
   if(action==='preflight'||preflight.report.status!=='READY'){console.log(JSON.stringify(preflight.report));if(preflight.report.status!=='READY')process.exitCode=2;return;}
   const {manifest,settings}=preflight,target=resolve(output),parent=realpathSync(dirname(target)),repository=realpathSync(preflight.repository!);
   const rel=relative(repository,join(parent,target.slice(dirname(target).length+1)));
-  if(rel!=='..'&&!rel.startsWith('..'+sep))throw new Error('PRIVATE_OUTPUT_MUST_BE_OUTSIDE_REPOSITORY');
+  if(rel!== '..'&&!rel.startsWith('..'+sep))throw new Error('PRIVATE_OUTPUT_MUST_BE_OUTSIDE_REPOSITORY');
   mkdirSync(target,{mode:0o700});const port=await freePort(),configPath=join(target,'config.json');
   const slots=manifest.participants.map((p,i)=>({id:p.slot,tokenEnv:`WORKER_${i}_TOKEN`}));
   save(configPath,{workerSlots:slots,profiles:manifest.profiles,characters:manifest.characters,sessionDefaults:settings});
@@ -55,12 +56,19 @@ async function main(){
     if(stopped)exitReason='OPERATOR_SIGNAL';else if(Date.now()>=deadline)exitReason='WALL_DEADLINE';
     const last=await api(`/v1/sessions/${id}/snapshot`);if(last.session.lifecycle!=='ENDED')await api(`/v1/sessions/${id}/end`,{});
     const usage=await api(`/v1/sessions/${id}/usage`),diagnostics=await api(`/v1/sessions/${id}/diagnostics`);
-    await diagnosticCommand(['diagnostic-export',id!,join(target,'private-recording.ndjson')],{CORE_URL:current.base,ADMIN_TOKEN:current.token});
+    // A bounded replay export is optional evidence, never the only surviving result.
+    // Preserve a validated, create-only SQLite snapshot (including committed WAL) first.
+    const database=await backupDatabase(env.DB_PATH!,join(target,'private-database.sqlite'));
+    let recordingStatus:'SAVED'|'SIZE_LIMIT'='SAVED';
+    try{await diagnosticCommand(['diagnostic-export',id!,join(target,'private-recording.ndjson')],{CORE_URL:current.base,ADMIN_TOKEN:current.token},fetch,{maxBytes:manifest.recordingMaxBytes});}
+    catch(error){if(!(error instanceof Error)||error.message!=='DIAGNOSTIC_SIZE_LIMIT')throw error;recordingStatus='SIZE_LIMIT';}
     const {networkCalls:preflightNetworkCalls,...checked}=preflight.report;
     const result={...checked,preflightNetworkCalls,modelCalls:usage.calls.reduce((n:number,c:{calls:number})=>n+c.calls,0),status:'EXECUTED',sessionId:id,elapsedMs:Date.now()-started,exitReason,usage,metrics:diagnostics.metrics,
-      semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,remoteInferenceCancellationGuaranteed:false,privateRecording:'private-recording.ndjson'};
+      semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,remoteInferenceCancellationGuaranteed:false,recordingStatus,recordingMaxBytes:manifest.recordingMaxBytes,privateRecording:recordingStatus==='SAVED'?'private-recording.ndjson':null,
+      privateDatabase:{path:'private-database.sqlite',schemaVersion:database.schemaVersion,integrity:database.integrity,rows:database.rows},
+      recordingWarning:recordingStatus==='SIZE_LIMIT'?'Replay export exceeded its bounded capacity; the validated private database is retained. No complete NDJSON replay was produced.':null};
     save(join(target,'result.json'),result);save(join(target,'resources.json'),samples);
-    console.log(JSON.stringify({status:'EXECUTED',scenario:manifest.scenario,evidenceMode:manifest.evidenceMode,sessionId:id,calls:usage.calls.reduce((n:number,c:{calls:number})=>n+c.calls,0),posts:usage.publicPosts,exitReason,semanticAcceptance:'NOT_EVALUATED',privateFiles:true}));
+    console.log(JSON.stringify({status:'EXECUTED',scenario:manifest.scenario,evidenceMode:manifest.evidenceMode,sessionId:id,calls:usage.calls.reduce((n:number,c:{calls:number})=>n+c.calls,0),posts:usage.publicPosts,exitReason,semanticAcceptance:'NOT_EVALUATED',recordingStatus,privateDatabaseRetained:true,privateFiles:true}));
   }catch(error){if(!existsSync(join(target,'resources.json')))save(join(target,'resources.json'),samples);save(join(target,'failure.json'),{status:'FAILED',sessionId:id??null,exitReason,code:error instanceof Error&&/^EXPERIMENT_[A-Z_]+$/.test(error.message)?error.message:'EXPERIMENT_FAILED',semanticAcceptance:'NOT_EVALUATED'});throw error;}
   finally{await cluster?.stop();process.off('SIGTERM',interrupt);process.off('SIGINT',interrupt);}
 }

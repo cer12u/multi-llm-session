@@ -1,3 +1,4 @@
+import {MAX_DIAGNOSTIC_BYTES} from '../observability/replay.js';
 import {z} from 'zod';
 import {execFileSync} from 'node:child_process';
 import {realpathSync} from 'node:fs';
@@ -11,6 +12,7 @@ import {hash} from '../domain/index.js';
 export const ExperimentSchema=z.object({
   schemaVersion:z.literal(1),approvedCommit:z.string().regex(/^[a-f0-9]{40}$/),
   evidenceMode:z.enum(['live','synthetic']),purpose:z.enum(['smoke','conversation']),scenario:Slug,
+  recordingMaxBytes:z.number().int().min(1024).max(MAX_DIAGNOSTIC_BYTES).default(MAX_DIAGNOSTIC_BYTES),
   initialText:Text,profiles:z.array(ModelProfileSchema).min(1).max(16),characters:z.array(CharacterSchema).min(3).max(16),
   participants:z.array(z.object({slot:z.string().regex(/^worker-[a-z0-9-]{1,24}$/),characterId:Slug,profileId:Slug}).strict()).min(3).max(16),
   bounds:z.object({maxCalls:z.number().int().min(1).max(10000),maxPosts:z.number().int().min(1).max(1000),durationMs:z.number().int().min(1000).max(21600000),maxOutputTokens:z.number().int().min(128).max(4096),maxTokens:z.number().int().min(1).max(1000000000)}).strict(),
