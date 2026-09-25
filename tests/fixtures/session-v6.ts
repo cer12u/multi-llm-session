@@ -5,7 +5,7 @@ import {asV7Fixture} from './source-v7.js';
  * No retired instances may exist. Never import this helper from application or deployment code.
  */
 export function asV6Fixture(db:Database.Database):void{
-  if(db.pragma('user_version',{simple:true})===8)asV7Fixture(db);
+  if(db.pragma('user_version',{simple:true})>=8)asV7Fixture(db);
   if(db.inTransaction||db.pragma('user_version',{simple:true})!==7)throw new Error('EXPECTED_ISOLATED_V7_FIXTURE');
   if(db.prepare('SELECT id FROM agent_instances WHERE retired_at IS NOT NULL LIMIT 1').get())throw new Error('RETIRED_DATA_CANNOT_BE_DOWNGRADED');
   const source=(db.prepare("SELECT sql FROM sqlite_master WHERE name='agent_instances' AND type='table'").get() as {sql:string}).sql;
