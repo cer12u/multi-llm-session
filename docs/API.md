@@ -58,6 +58,6 @@ run操作はepoch/tokenと所有slotを検査します。call予約はrequestKey
 
 ## 生成契約・エラー
 
-`node dist/apps/cli/schema.js --check`は31個の生成JSON Schemaを`config/schema-baseline.json`の検証済みhashと照合し、差分で失敗します。変更時は生成差分のレビュー後に一覧を更新します。これは全HTTP APIのOpenAPI生成ではなく、Zodで表現できる構造の検査です。所有者・現在版・世代は実行時検査を維持します。
+`GET /v1/openapi.json`（管理者限定）または`npm run cli -- openapi`でOpenAPI 3.1.1を取得できます。実際に登録した76 API操作と共有入力schema、認証、パス/query/header、SSE/NDJSONを含む応答形式を対応付けます。`node dist/apps/cli/schema.js --check`は既存31 JSON SchemaとOpenAPIのレビュー済みhashを照合し、ルート未記載・削除済み説明・契約差分で失敗します。public DTOは型付き、可変のprivate診断内部は拡張可能として明示します。取得・範囲・E2Eは[OPENAPI.md](OPENAPI.md)を参照してください。所有者・現在版・世代の実行時検査は維持します。
 
 401は認証、403は権限/Origin/CSRF、404は不存在、409は世代/状態/再送競合、410は削除原文、413はサイズ、422は構造、429は同時枠等です。本文は安全なcodeを基本とし、Providerの生のエラーや鍵を公開しません。
