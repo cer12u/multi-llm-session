@@ -1,3 +1,4 @@
+import {HttpBody} from '../../packages/contracts/http.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { Id, Slug, ensure } from '../../packages/contracts/index.js';
@@ -18,7 +19,7 @@ export function registerOperationsRoutes(app:FastifyInstance,service:SessionServ
   });
   app.get('/v1/sessions/:id/operations',async req=>{authorize(req);const {id}=z.object({id:Id}).parse(req.params);return operations(service,id);});
   app.post('/v1/model-profiles/:profile/versions/:version/retry',async req=>{
-    authorize(req,true);z.object({}).strict().parse(req.body);
+    authorize(req,true);HttpBody.empty.parse(req.body);
     const {profile,version}=z.object({profile:Slug,version:z.coerce.number().int().positive()}).parse(req.params);
     const key=req.headers['idempotency-key'];ensure(typeof key==='string',422,'IDEMPOTENCY_KEY_REQUIRED');
     return service.retryProvider(profile,key,version);
