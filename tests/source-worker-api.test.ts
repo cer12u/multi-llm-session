@@ -42,7 +42,7 @@ it('R6-SOURCE-020: three actual HTTP Workers may discuss, defer or ignore materi
           upsert:[{id:'source-interest',kind:'interest',text:'PRIVATE_B_SOURCE_INTEREST',resume:null,evidence:[{kind:'source',id:shared.id,version:shared.version}]}],remove:[]}};
       }else output={decision:'ABSTAIN',reason:'C chooses not to discuss the material'};
       return {text:JSON.stringify(output),usage:{inputTokens:7,outputTokens:3}};
-    }}));
+    }})));
     await Promise.all(workers.map(w=>w.register()));f.start();
     await Promise.all(workers.map(w=>w.once()));
     expect(f.service.session(f.id).bot_count).toBe(0);expect(f.service.agents(f.id).every(a=>a.error_count===0)).toBe(true);
