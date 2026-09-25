@@ -350,7 +350,7 @@ export class SessionService {
     const sequence=this.store.get<{message_seq:number}>('SELECT message_seq FROM sessions WHERE id=?',session)!.message_seq+1;
     const threadRoot=intent.replyTo?this.store.get<MessageRow>('SELECT * FROM messages WHERE id=?',intent.replyTo)!.thread_root:id;
     this.store.run('UPDATE sessions SET message_seq=? WHERE id=?',sequence,session);
-    this.store.run('UPDATE sessions SET revision=?,last_activity_at=?,last_post_at=?,episode=?,activity=? WHERE id=?',revision,now,now,episode,'ACTIVE',session);
+    this.store.run('UPDATE sessions SET revision=?,last_activity_at=?,last_post_at=?,episode=?,activity=? WHERE id=?',revision,now,now,episode,s.lifecycle==='PAUSED'&&s.activity==='BUDGET_PAUSED'?'BUDGET_PAUSED':'ACTIVE',session);
     this.store.run('INSERT INTO messages(id,session_id,revision,author_id,text,act,reply_to,addressed_json,candidate_id,episode,created_at,sequence,thread_root) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
       id,session,revision,author,text,intent.act,intent.replyTo,JSON.stringify(intent.addressedTo),candidateId,episode,now,sequence,threadRoot);
     this.store.run('INSERT INTO messages_fts(message_id,session_id,text) VALUES(?,?,?)',id,session,text);
