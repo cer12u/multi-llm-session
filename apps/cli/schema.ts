@@ -1,3 +1,4 @@
+import {exportOpenApi} from './openapi.js';
 import {OperationalBudgetSchema,BudgetPolicyUpdateSchema} from '../../packages/contracts/budget.js';
 import {mkdir,writeFile,readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -17,10 +18,12 @@ for(const [name,schema]of Object.entries(schemas)){
   const text=JSON.stringify(z.toJSONSchema(schema),null,2),file=name+'.schema.json';
   await writeFile(join(root,file),text);digests[file]=createHash('sha256').update(text).digest('hex');
 }
+const api=JSON.stringify(await exportOpenApi(),null,2);
+await writeFile(join(root,'openapi.json'),api);digests['openapi.json']=createHash('sha256').update(api).digest('hex');
 if(check){
   const baseline=JSON.parse(await readFile('config/schema-baseline.json','utf8')) as {schemas:Record<string,string>};
   const changed=[...new Set([...Object.keys(baseline.schemas),...Object.keys(digests)])].filter(name=>baseline.schemas[name]!==digests[name]);
   await writeFile(join(root,'schema-diff.json'),JSON.stringify({changed,matched:changed.length===0},null,2));
   if(changed.length)throw new Error('CONTRACT_SCHEMA_DRIFT: '+changed.join(', '));
 }
-console.log(`Exported ${Object.keys(schemas).length} contract schemas. Runtime semantic checks still apply.`);
+console.log(`Exported ${Object.keys(schemas).length} contract schemas and the registered HTTP OpenAPI. Runtime semantic checks still apply.`);

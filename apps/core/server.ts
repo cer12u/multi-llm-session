@@ -1,3 +1,5 @@
+import {HttpBody,HttpQuery,PageQuery,ReceiptParams} from '../../packages/contracts/http.js';
+import {installOpenApi} from './openapi.js';
 import {authorizeWorkerAgentRead} from './worker-read.js';
 import {registerObservabilityRoutes} from './observability-routes.js';
 import {publicTranscript} from '../../packages/observability/index.js';
@@ -20,14 +22,13 @@ type Login={role:Role;csrf:string;expires:number};
 function equal(a:string,b:string):boolean { const aa=Buffer.from(a),bb=Buffer.from(b); return aa.length===bb.length&&timingSafeEqual(aa,bb); }
 function header(request:FastifyRequest,name:string):string { const value=request.headers[name]; return typeof value==='string'?value:''; }
 const ParamId=z.object({id:Id});
-const PageQuery=z.object({cursor:z.string().max(2048).optional(),limit:z.coerce.number().int().min(1).max(200).default(100)}).strict();
-const RunAuth=z.object({epoch:z.number().int().positive(),token:Id}).strict();
 const mime:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.map':'application/json','.svg':'image/svg+xml'};
 
 /** Single-operator lab authentication. Not a multi-tenant/public hosting authentication product. */
 export function buildServer(service:SessionService,options:{webRoot?:string;timers?:boolean}={}) {
   const config=service.config;
   const app=Fastify({logger:false,bodyLimit:65536,requestTimeout:20000,connectionTimeout:10000,forceCloseConnections:true});
+  installOpenApi(app,req=>{principal(req,false,true);});
   const logins=new Map<string,Login>(),attempts=new Map<string,{count:number;until:number}>();
   const streams=new Set<()=>void>();
   const security={
@@ -72,7 +73,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
     ensure(header(req,'origin')===config.publicOrigin,403,'ORIGIN_REQUIRED');
     const now=service.now(); for(const [ip,v] of attempts) if(v.until<=now) attempts.delete(ip);
     const old=attempts.get(req.ip)??{count:0,until:now+60000}; old.count++; attempts.set(req.ip,old); ensure(old.count<=10,429,'LOGIN_RATE_LIMIT');
-    const {token}=z.object({token:z.string().max(500)}).strict().parse(req.body);
+    const {token}=HttpBody.login.parse(req.body);
     const role=equal(token,config.adminToken)?'operator':config.viewerToken&&equal(token,config.viewerToken)?'viewer':null;
     ensure(role,401,'INVALID_LOGIN');
     for(const [id,login] of logins) if(login.expires<=now) logins.delete(id);
@@ -107,30 +108,30 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   app.get('/v1/sessions',async req=>{principal(req);return service.listSessions();});
   app.post('/v1/sessions',async req=>{principal(req,true,true);return service.createSession(req.body,key(req));});
   for(const action of ['start','pause','resume','end'] as const) app.post(`/v1/sessions/:id/${action}`,async req=>{
-    principal(req,true,true);z.object({}).strict().parse(req.body??{});return service.lifecycle(sessionId(req),action,key(req));
+    principal(req,true,true);HttpBody.empty.parse(req.body??{});return service.lifecycle(sessionId(req),action,key(req));
   });
   app.post('/v1/sessions/:id/settings',async req=>{principal(req,true,true);return service.updateSettings(sessionId(req),req.body,key(req));});
   app.post('/v1/sessions/:id/members',async req=>{
-    principal(req,true,true);const body=z.object({agentId:Id,enabled:z.boolean()}).strict().parse(req.body);
+    principal(req,true,true);const body=HttpBody.memberEnabled.parse(req.body);
     service.setAgentEnabled(sessionId(req),body.agentId,body.enabled,key(req));return {ok:true};
   });
-  app.post('/v1/sessions/:id/budget',async req=>{principal(req,true,true);z.object({}).strict().parse(req.body);return service.renewBudget(sessionId(req),key(req));});
+  app.post('/v1/sessions/:id/budget',async req=>{principal(req,true,true);HttpBody.empty.parse(req.body);return service.renewBudget(sessionId(req),key(req));});
   app.post('/v1/sessions/:id/agents/:agentId/retry',async req=>{principal(req,true,true);const p=z.object({id:Id,agentId:Id}).parse(req.params);return service.retryAgent(p.id,p.agentId,key(req));});
   app.get('/v1/sessions/:id/history',async req=>{principal(req);return service.pages.history(sessionId(req),PageQuery.parse(req.query));});
   app.get('/v1/sessions/:id/threads/:messageId',async req=>{principal(req);const p=z.object({id:Id,messageId:Id}).parse(req.params);return service.pages.thread(p.id,p.messageId,PageQuery.parse(req.query));});
-  app.get('/v1/sessions/:id/search-page',async req=>{principal(req);const {q,...options}=PageQuery.extend({q:z.string().min(1).max(200)}).parse(req.query);return service.pages.search(sessionId(req),q,options);});
-  app.post('/v1/sessions/:id/messages/lookup',async req=>{principal(req);const {ids}=z.object({ids:z.array(Id).max(200)}).strict().parse(req.body);return service.pages.byIds(sessionId(req),ids);});
+  app.get('/v1/sessions/:id/search-page',async req=>{principal(req);const {q,...options}=HttpQuery.searchPage.parse(req.query);return service.pages.search(sessionId(req),q,options);});
+  app.post('/v1/sessions/:id/messages/lookup',async req=>{principal(req);const {ids}=HttpBody.messageLookup.parse(req.body);return service.pages.byIds(sessionId(req),ids);});
   app.get('/v1/sessions/:id/snapshot',async req=>{principal(req);return service.snapshot(sessionId(req));});
   app.post('/v1/sessions/:id/messages',async req=>{principal(req,true,true);return service.humanMessage(sessionId(req),req.body,key(req));});
   app.post('/v1/sessions/:id/messages/:messageId',async req=>{
-    principal(req,true,true);const p=z.object({id:Id,messageId:Id}).parse(req.params),body=z.object({text:z.string().nullable()}).strict().parse(req.body);
+    principal(req,true,true);const p=z.object({id:Id,messageId:Id}).parse(req.params),body=HttpBody.messageEdit.parse(req.body);
     return service.changeMessage(p.id,p.messageId,body.text,key(req));
   });
   app.post('/v1/sessions/:id/sources',async req=>{principal(req,true,true);return service.injectSource(sessionId(req),req.body,key(req));});
-  app.get('/v1/sessions/:id/search',async req=>{principal(req);const q=z.object({q:z.string().min(1).max(200)}).parse(req.query);return service.searchArchive(sessionId(req),q.q);});
+  app.get('/v1/sessions/:id/search',async req=>{principal(req);const q=HttpQuery.search.parse(req.query);return service.searchArchive(sessionId(req),q.q);});
   app.get('/v1/sessions/:id/archive/:messageId',async req=>{principal(req);const p=z.object({id:Id,messageId:Id}).parse(req.params);return service.archiveMessage(p.id,p.messageId);});
   app.get('/v1/sessions/:id/commands/:operation/:key',async req=>{
-    principal(req,false,true);const p=z.object({id:Id,operation:z.enum(['message','lifecycle','edit','settings','membership','participants','clone']),key:z.string().max(128)}).parse(req.params);
+    principal(req,false,true);const p=ReceiptParams.parse(req.params);
     return service.commandReceipt(p.id,p.operation,p.key);
   });
   registerObservabilityRoutes(app,service,(req,operator)=>{principal(req,false,operator);});
@@ -138,7 +139,7 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
   app.get('/v1/sessions/:id/export',async(req,reply)=>{principal(req,false,true);const id=sessionId(req);reply.header('content-disposition',`attachment; filename="session-${id}.json"`);return publicTranscript(service,id);});
   app.get('/v1/sessions/:id/events',async(req,reply)=>{
     const p=principal(req),id=sessionId(req);const loginId=header(req,'authorization').startsWith('Bearer ')?'':cookieId(req);const authorized=()=>p.expires>service.now()&&(!loginId||logins.get(loginId)===p);
-    const query=z.object({cursor:z.string().max(100).optional()}).parse(req.query);
+    const query=HttpQuery.events.parse(req.query);
     let cursor=header(req,'last-event-id')||query.cursor||service.snapshot(id).cursor;
     service.eventsAfter(id,cursor,1); ensure(streams.size<50,503,'STREAM_LIMIT');
     reply.hijack();reply.raw.writeHead(200,{...security,'content-type':'text/event-stream; charset=utf-8','connection':'keep-alive','x-accel-buffering':'no'});
@@ -158,28 +159,28 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
     const timer=setInterval(()=>{if(!authorized())close();else {reply.raw.write(': heartbeat\n\n');pump();}},10000);
     streams.add(close);service.changes.on('changed',pump);reply.raw.on('close',close);pump();
   });
-  app.post('/v1/worker/register',async req=>{z.object({}).strict().parse(req.body);return service.registerWorker(worker(req));});
-  app.post('/v1/worker/claim',async req=>{const b=z.object({epoch:z.number().int().positive()}).strict().parse(req.body);return service.claim(worker(req),b.epoch);});
-  app.post('/v1/worker/runs/:id/heartbeat',async req=>{const b=RunAuth.parse(req.body);return service.heartbeat(worker(req),b.epoch,sessionId(req),b.token);});
+  app.post('/v1/worker/register',async req=>{HttpBody.empty.parse(req.body);return service.registerWorker(worker(req));});
+  app.post('/v1/worker/claim',async req=>{const b=HttpBody.workerClaim.parse(req.body);return service.claim(worker(req),b.epoch);});
+  app.post('/v1/worker/runs/:id/heartbeat',async req=>{const b=HttpBody.runAuth.parse(req.body);return service.heartbeat(worker(req),b.epoch,sessionId(req),b.token);});
   app.post('/v1/worker/runs/:id/calls',async req=>{
-    const b=RunAuth.extend({requestKey:z.string().min(8).max(128),stage:z.enum(['primary','repair','lookup'])}).parse(req.body);
+    const b=HttpBody.callReserve.parse(req.body);
     return service.reserveCall(worker(req),b.epoch,sessionId(req),b.token,b.requestKey,b.stage);
   });
   app.post('/v1/worker/runs/:id/calls/:callId',async req=>{
-    const p=z.object({id:Id,callId:Id}).parse(req.params),b=z.object({token:Id,usage:UsageSchema,error:ErrorCodeSchema.nullable(),retryAfterMs:z.number().int().min(0).max(86400000).default(0)}).strict().parse(req.body);
+    const p=z.object({id:Id,callId:Id}).parse(req.params),b=HttpBody.callFinish.parse(req.body);
     return service.finishCall(worker(req),p.id,b.token,p.callId,b.usage,b.error,b.retryAfterMs);
   });
   app.post('/v1/worker/runs/:id/lookup',async req=>{
-    const b=RunAuth.extend({requestKey:z.string().min(8).max(128),requests:z.array(LookupRequestSchema).min(1).max(3)}).parse(req.body);
+    const b=HttpBody.runLookup.parse(req.body);
     return service.retrieve(worker(req),b.epoch,sessionId(req),b.token,b.requestKey,b.requests);
   });
   app.get('/v1/worker/agents/:id/memory-page',async req=>{
-    const id=sessionId(req);ownAgent(req,id);const {q,...options}=PageQuery.extend({q:z.string().max(200).default('')}).parse(req.query);return service.pages.memories(id,q,options);
+    const id=sessionId(req);ownAgent(req,id);const {q,...options}=HttpQuery.memoryPage.parse(req.query);return service.pages.memories(id,q,options);
   });
-  app.post('/v1/worker/runs/:id/result',async req=>{const b=RunAuth.extend({output:z.unknown()}).parse(req.body);return service.completeRun(worker(req),b.epoch,sessionId(req),b.token,b.output);});
-  app.post('/v1/worker/runs/:id/failure',async req=>{const b=RunAuth.extend({code:ErrorCodeSchema}).parse(req.body);return service.failRun(worker(req),b.epoch,sessionId(req),b.token,b.code as ModelErrorCode);});
+  app.post('/v1/worker/runs/:id/result',async req=>{const b=HttpBody.runResult.parse(req.body);return service.completeRun(worker(req),b.epoch,sessionId(req),b.token,b.output);});
+  app.post('/v1/worker/runs/:id/failure',async req=>{const b=HttpBody.runFailure.parse(req.body);return service.failRun(worker(req),b.epoch,sessionId(req),b.token,b.code as ModelErrorCode);});
   app.get('/v1/worker/agents/:id/memory',async req=>{const id=sessionId(req);return service.workerMemories(ownAgent(req,id),id);});
-  app.get('/v1/worker/agents/:id/archive',async req=>{const id=sessionId(req);ownAgent(req,id);const q=z.object({q:z.string().min(1).max(200)}).parse(req.query);return service.searchArchive(service.agent(id).session_id,q.q);});
+  app.get('/v1/worker/agents/:id/archive',async req=>{const id=sessionId(req);ownAgent(req,id);const q=HttpQuery.search.parse(req.query);return service.searchArchive(service.agent(id).session_id,q.q);});
   app.get('/v1/worker/agents/:id/archive/:messageId',async req=>{const p=z.object({id:Id,messageId:Id}).parse(req.params);ownAgent(req,p.id);return service.archiveMessage(service.agent(p.id).session_id,p.messageId);});
   const root=resolve(options.webRoot??'dist/web');
   async function asset(path:string) {const file=resolve(root,path);ensure(file.startsWith(root+sep),404,'NOT_FOUND');try{return await readFile(file);}catch{throw new AppError(404,'NOT_FOUND');}}

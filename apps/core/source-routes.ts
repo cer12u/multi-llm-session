@@ -1,3 +1,4 @@
+import {HttpBody} from '../../packages/contracts/http.js';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { Id, ensure } from '../../packages/contracts/index.js';
@@ -16,5 +17,5 @@ export function registerSourceRoutes(app:FastifyInstance,service:SessionService,
   app.post('/v1/sessions/:id/sources/:source',async req=>{authorize(req,true);const p=params(req);return service.sources.update(p.id,p.source,req.body,key(req));});
   app.get('/v1/sessions/:id/feeds',async req=>{authorize(req);return service.sources.feeds(session(req));});
   app.post('/v1/sessions/:id/feeds',async req=>{authorize(req,true);return service.sources.putFeed(session(req),req.body,key(req));});
-  app.post('/v1/sessions/:id/feeds/:source/retry',async req=>{authorize(req,true);z.object({}).strict().parse(req.body);const p=params(req);return service.sources.retryFeed(p.id,p.source,key(req));});
+  app.post('/v1/sessions/:id/feeds/:source/retry',async req=>{authorize(req,true);HttpBody.empty.parse(req.body);const p=params(req);return service.sources.retryFeed(p.id,p.source,key(req));});
 }
