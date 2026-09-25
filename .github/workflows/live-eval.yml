@@ -3,10 +3,18 @@ on:
   workflow_dispatch:
     inputs:
       confirm_billable_calls:
-        description: 'Authorize one bounded live experiment (up to 120 calls / 30 posts / 15 minutes)'
+        description: 'Authorize one smoke: up to 120 calls / 30 posts / 15 minutes / 2M reserved tokens'
         type: boolean
         required: true
         default: false
+      approved_sha:
+        description: 'Exact current main SHA explicitly approved for this execution'
+        type: string
+        required: true
+      manifest_json:
+        description: 'Experiment manifest JSON; references only, never credential values'
+        type: string
+        required: true
 permissions:
   contents: read
 concurrency:
@@ -14,34 +22,62 @@ concurrency:
   cancel-in-progress: false
 jobs:
   evaluate:
-    if: github.ref == 'refs/heads/main' && inputs.confirm_billable_calls && vars.ENABLE_LIVE_EVAL == 'true'
+    if: github.ref == 'refs/heads/main' && inputs.confirm_billable_calls && inputs.approved_sha == github.sha && vars.ENABLE_LIVE_EVAL == 'true'
     environment: live-evaluation
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '24.20.0'
           package-manager-cache: false
+      - name: Validate the operator manifest before exposing model credentials
+        env:
+          EXPERIMENT_MANIFEST: ${{ inputs.manifest_json }}
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import {writeFileSync} from 'node:fs';
+          import {join} from 'node:path';
+          const raw=process.env.EXPERIMENT_MANIFEST??'';
+          if(Buffer.byteLength(raw)>1048576)throw new Error('MANIFEST_TOO_LARGE');
+          const m=JSON.parse(raw),b=m.bounds;
+          if(!/^[a-f0-9]{40}$/.test(process.env.APPROVED_SHA??'')||m.approvedCommit!==process.env.APPROVED_SHA||m.approvedCommit!==process.env.GITHUB_SHA)throw new Error('SHA_NOT_APPROVED');
+          if(m.evidenceMode!=='live'||m.purpose!=='smoke'||!b||!(b.maxCalls<=120&&b.maxPosts<=30&&b.durationMs<=900000&&b.maxTokens<=2000000&&b.maxOutputTokens<=4096))throw new Error('OUTSIDE_CONFIRMED_SMOKE_BOUNDS');
+          if(!Array.isArray(m.profiles)||m.profiles.some(p=>p.apiKeyEnv&&p.apiKeyEnv!=='LLM_API_KEY'))throw new Error('UNCONFIGURED_CREDENTIAL_REFERENCE');
+          writeFileSync(join(process.env.RUNNER_TEMP,'mls-manifest.json'),raw,{flag:'wx',mode:0o600});
+          NODE
       - run: npm ci
       - run: npm run check
-      - name: Run one bounded session against explicitly configured API
+      - name: Preflight and execute the approved bounded smoke
         env:
           ALLOW_LIVE_MODELS: '1'
-          MODEL_PROVIDER: ${{ vars.MODEL_PROVIDER }}
-          MODEL_NAME: ${{ vars.MODEL_NAME }}
-          MODEL_BASE_URL: ${{ vars.MODEL_BASE_URL }}
-          MODEL_JSON_MODE: ${{ vars.MODEL_JSON_MODE || 'none' }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          EXPORT_LIVE_TRANSCRIPT: '0'
-        run: npm run lab -- --live
+        run: |
+          node --import tsx apps/cli/experiment.ts preflight "$RUNNER_TEMP/mls-manifest.json"
+          node --import tsx apps/cli/experiment.ts execute "$RUNNER_TEMP/mls-manifest.json" "$RUNNER_TEMP/mls-private"
+      - name: Retain aggregate evidence only, never private recordings
+        if: always()
+        run: |
+          node --input-type=module <<'NODE'
+          import {existsSync,readFileSync,mkdirSync,writeFileSync} from 'node:fs';
+          import {join} from 'node:path';
+          const file=join(process.env.RUNNER_TEMP,'mls-private','result.json');
+          const data=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):null;
+          const result=data?{status:data.status,sha:data.commit,configHash:data.configHash,evidenceMode:data.evidenceMode,elapsedMs:data.elapsedMs,exitReason:data.exitReason,calls:data.usage.calls,publicPosts:data.usage.publicPosts,semanticAcceptance:'NOT_EVALUATED',privateRecordingRetained:false}:{status:'BLOCKED_OR_FAILED',sha:process.env.GITHUB_SHA,semanticAcceptance:'NOT_EVALUATED',privateRecordingRetained:false};
+          mkdirSync('artifacts/live-summary',{recursive:true});writeFileSync('artifacts/live-summary/result.json',JSON.stringify(result,null,2));
+          NODE
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: live-metrics-${{ github.run_id }}
-          path: artifacts/lab/*metrics.json
+          path: artifacts/live-summary/result.json
           retention-days: 7
           if-no-files-found: warn
+      - name: Remove runner-private experiment data
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/mls-private" "$RUNNER_TEMP/mls-manifest.json"

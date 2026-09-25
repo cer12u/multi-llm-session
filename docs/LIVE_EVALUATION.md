@@ -1,51 +1,19 @@
-# 実LLM検証への切り替え
+# 実Provider適合・実会話評価
 
-**このリポジトリを作成した段階では実LLMの呼び出しを行っていません。** 模擬検証の成功を、特定モデルの形式遵守や会話品質の成功と読み替えないでください。
+通常CIは合成データだけを使用します。実APIへの接続、自然な任意会話、人による読解評価、長時間運用は別の実行結果で判定します。
 
-## GitHub Actionsで実行する前の設定
+## 実行入口
 
-`live-evaluation` Environmentを作成し、適切な実行承認を設定してください。利用プランによって承認機能の可否は異なるため、承認が利用できない場合もmain上の確認済みコード以外では実行しないでください。
+ローカルで原データを保持する実行は[EXPERIMENT_EXECUTION.md](EXPERIMENT_EXECUTION.md)のmanifest付きCLIを使います。以前の`npm run lab -- --live`は廃止しました。`npm run lab`は従来の3/5/8プロセスの模擬制御試験専用で、自然な会話品質を判定しません。
 
-RepoまたはEnvironment Variables:
+Actionsの`Explicit live model evaluation`は手動のみです。mainの正確なapproved_sha、秘密値を含まないmanifest_json、課金確認、既存のENABLE_LIVE_EVAL変数とlive-evaluation環境を要求します。PRのコードへ自動でキーを渡しません。確認対象は最大120呼出し・30公開発言・15分・保守予約200万tokenのsmokeで、manifestが小さい上限ならその値を使います。キー参照は既存のLLM_API_KEY Secretだけです。workflowやmanifestを保存しただけでは推論しません。
 
-| 名前 | 値 |
-|---|---|
-| ENABLE_LIVE_EVAL | 明示的に `true` |
-| MODEL_PROVIDER | `ollama` または `openai` |
-| MODEL_NAME | APIが受け付ける正確なモデルID |
-| MODEL_BASE_URL | Ollamaは `/api` まで、OpenAI互換は一般に `/v1` までのベースURL |
-| MODEL_JSON_MODE | `none` / `json` / `schema`。未確認のAPIにはnoneから開始 |
+Actionsは集計だけをartifactへ保存し、私有recording/DB/persona/promptは公開artifactへ置かず、最後にrunnerの一時データを削除します。したがってActionsのsmoke成果物は会話の人間読解に必要な原データを保存する経路ではありません。人間評価・再生用の原データが必要な実験は、非公開出力を保持するローカルCLIで実行します。
 
-Secret: **LLM_API_KEY**。鍵の値をRepo・Issue・チャットへ記載しません。workflowはmainの確認済みコードを対象とし、`confirm_billable_calls` を明示的に承認した場合のみ実行されます。この実装PRは自動マージしないため、現在はworkflowがmainに存在しません。PR確認とマージ後の操作です。
+## 判定を混同しない
 
-初回の上限は1セッション、3 Agent、15分、合計120呼び出し、30件のBot発言です。decide/draft/review/memory/形式修復をすべて呼び出し数へ含めます。各APIの最大生成量にも上限を設定しますが、リモート側の推論キャンセルや正確な金額上限を保証するものではありません。Provider自身の利用上限設定も併用してください。
+Provider適合では実際のモデルID・API形式・JSON/schema・打切り・修復・LOOKUP・usage有無・エラーを用途別に記録します。3つのWorkerがHTTP接続したという制御証拠と、サービスが期待する形式を実モデルが返した実証は別です。短い疎通で全種類のエラーが発生しなかった場合、その分岐を実API検証済みにしません。
 
-実モデルworkflowは初期設定でmetricsのみをartifactへ保存します。生の会話、人格、私有コンテキストの公開保存はしません。このRepoはPublicなので、workflowログへの記載内容にも注意してください。
+会話評価は[CONVERSATION_EVALUATION.md](CONVERSATION_EVALUATION.md)と20題材を使い、私有状態・出典・第三者の影響、成功/失敗/無発言を人が確認します。モデルjudgeや合成の固定台詞だけでは合格にしません。EXECUTEDやCI successはsemantic acceptanceではありません。
 
-## ローカルCLIでの明示実行
-
-必要な環境変数を安全に設定したうえで、次を実行します。
-
-```bash
-npm ci
-npm run check
-npm run lab -- --live
-```
-
-上記に加えて `ALLOW_LIVE_MODELS=1` が必要です。`MODEL_PROVIDER`、`MODEL_NAME`、`MODEL_BASE_URL`、`LLM_API_KEY` を設定してください。生の会話JSONをローカルへ保存する場合だけ `EXPORT_LIVE_TRANSCRIPT=1` を明示します。通常の `npm run lab` は実モデル設定が環境にあってもmockへ戻し、有料APIを呼びません。
-
-専用UIを実LLMにつなぐ場合も同じ環境変数を設定し、`npm run dev` で起動して参加者のprofileを `live` に変更します。さらに細かい構成はAPP_CONFIGで指定し、モデルごとのbaseUrl/model/apiKeyEnv/jsonModeを定義します。APIキーはJSONファイルに直書きしません。
-
-## API互換性
-
-Ollama: 非ストリーム `/chat`、message.content、prompt_eval_count/eval_countを利用します。baseUrlが `/api` の場合、実際のパスは `/api/chat` です。
-
-OpenAI互換: 非ストリーム `/chat/completions`、choices[0].message.content、usageを利用します。現在はmax_tokensとtemperatureを送ります。これらを受け付けないモデル、Responses専用モデル、推論トークン制御の特殊仕様を持つProviderには専用アダプター調整が必要です。「互換APIを名乗る全サービスに対応済み」ではありません。
-
-noneはプロンプト指示+JSONパース、jsonはAPIのJSON mode、schemaはresultオブジェクトで包んだJSON Schemaを要求します。モデルが返すJSONを検査し、最大1回修復します。APIで厳格なJSONを保証できることを共通前提にしていません。
-
-## 最初に評価する内容
-
-20種類以上の導入話題を用意し、自由な雑談、質問、訂正、複数話題、資料への感想、沈黙、昔の話題の再開を評価します。モデル・人格・設定・commitを記録し、実際のメッセージと短い制御ログから、遅延返信、重複、取りこぼした質問、参加機会、三体目の発言への反応を確認します。
-
-全員の発言数を同数にすること、一定数まで強制的に続けること、毎回質問することを成功条件にしません。設定を調整した場合は、変更前後で同じ導入話題を使いますが、実モデル会話が完全再現できるとは仮定しません。
+長時間試験は事前に負荷・実時間・許容範囲を固定し、CPU/RAM、DB増加、未処理量、接続数、復旧時間を測定します。短いE2Eやsmokeから24時間安定を推定して完了と扱いません。現在の実測の有無と対象commitはIssue #27/#28/#29および各PRの記録で確認してください。
