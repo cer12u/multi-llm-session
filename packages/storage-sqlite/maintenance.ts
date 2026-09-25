@@ -78,7 +78,7 @@ export async function backupDatabase(source:string,destination:string):Promise<S
 /** Restore to a new path. Existing operational DB/WAL files are never replaced automatically. */
 export async function restoreDatabase(backup:string,destination:string):Promise<StorageReport>{return backupDatabase(backup,destination);}
 /** Explicit offline operation, not an additional long-running DB writer. Caller must stop Core and workers first. */
-export function maintainDatabase(source:string,acknowledgeOffline:boolean):Promise<never>|StorageReport {
+export function maintainDatabase(source:string,acknowledgeOffline:boolean):StorageReport {
   if(!acknowledgeOffline)throw new Error('STORAGE_OFFLINE_ACK_REQUIRED');
   const path=existing(source),db=openExisting(path,false);
   try{
