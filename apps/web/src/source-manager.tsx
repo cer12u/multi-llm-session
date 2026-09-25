@@ -68,10 +68,10 @@ export function SourceManager({session,agents,api}:{session:PublicSession;agents
     </div>}
     <form onSubmit={e=>{e.preventDefault();void operation(saveSource);}}><fieldset disabled={busy||locked||historical}>
       <legend>資料の追加・改訂</legend>
-      <label>資料名<input value={form.title} required maxLength={300} onChange={e=>setForm(v=>({...v,title:e.target.value}))}/></label>
-      <label>本文<textarea className="source-editor" value={form.text} required maxLength={20000} onChange={e=>setForm(v=>({...v,text:e.target.value}))}/></label>
-      <label>出典URL<input type="url" value={form.url??''} onChange={e=>setForm(v=>({...v,url:e.target.value||null}))}/></label>
-      <label>公開日時（ISO 8601・不明なら空欄）<input value={form.publishedAt??''} placeholder="2020-01-02T03:04:05Z" onChange={e=>setForm(v=>({...v,publishedAt:e.target.value||null}))}/></label>
+      <label>資料名<input aria-label="資料名" value={form.title} required maxLength={300} onChange={e=>setForm(v=>({...v,title:e.target.value}))}/></label>
+      <label>本文<textarea aria-label="本文" className="source-editor" value={form.text} required maxLength={20000} onChange={e=>setForm(v=>({...v,text:e.target.value}))}/></label>
+      <label>出典URL<input aria-label="出典URL" type="url" value={form.url??''} onChange={e=>setForm(v=>({...v,url:e.target.value||null}))}/></label>
+      <label>公開日時（ISO 8601・不明なら空欄）<input aria-label="公開日時（ISO 8601・不明なら空欄）" value={form.publishedAt??''} placeholder="2020-01-02T03:04:05Z" onChange={e=>setForm(v=>({...v,publishedAt:e.target.value||null}))}/></label>
       {audience(form.audience,value=>setForm(v=>({...v,audience:value})),'資料の配信先')}
       <label className="source-check"><input type="checkbox" checked={form.enabled} onChange={e=>setForm(v=>({...v,enabled:e.target.checked}))}/>資料の配信を有効にする</label>
       <p className="muted">配信停止・配信先変更は旧runと参照を失効させます。過去の原文・管理者監査履歴・バックアップの完全消去ではありません。</p>
@@ -80,8 +80,8 @@ export function SourceManager({session,agents,api}:{session:PublicSession;agents
     <details className="feed-manager"><summary>設定済みフィードの取得管理</summary>
       <p>配置設定の許可リストから選びます。任意URLの直接取得は行いません。稼働中だけ取得を開始し、実行中の取得が一時停止後に完了する場合は資料として保存します。</p>
       <form onSubmit={e=>{e.preventDefault();void operation(async()=>{const result=await api<{id:string;version:number}>(root+'/feeds',feed);if(alive.current){setFeed(v=>({...v,expectedVersion:result.version}));setNotice(`フィード設定を保存しました：v${result.version}`);}});}}><fieldset disabled={busy||locked}>
-        <legend>フィード設定</legend><label>フィード<select value={feed.configId} required onChange={e=>chooseFeed(e.target.value)}><option value="">選択してください</option>{configs.map(c=><option key={c.id} value={c.id} disabled={!c.usable}>{c.id}</option>)}</select></label>
-        <label>取得間隔（秒）<input type="number" min={60} max={86400} value={feed.intervalMs/1000} onChange={e=>setFeed(v=>({...v,intervalMs:Number(e.target.value)*1000}))}/></label>
+        <legend>フィード設定</legend><label>フィード<select aria-label="フィード" value={feed.configId} required onChange={e=>chooseFeed(e.target.value)}><option value="">選択してください</option>{configs.map(c=><option key={c.id} value={c.id} disabled={!c.usable}>{c.id}</option>)}</select></label>
+        <label>取得間隔（秒）<input aria-label="取得間隔（秒）" type="number" min={60} max={86400} value={feed.intervalMs/1000} onChange={e=>setFeed(v=>({...v,intervalMs:Number(e.target.value)*1000}))}/></label>
         {audience(feed.audience,value=>setFeed(v=>({...v,audience:value})),'フィードの配信先')}
         <label className="source-check"><input type="checkbox" checked={feed.enabled} onChange={e=>setFeed(v=>({...v,enabled:e.target.checked}))}/>定期取得を有効にする</label>
         <button disabled={!feed.configId||feed.audience!==null&&!feed.audience.length} type="submit">フィード設定を保存</button>
@@ -90,7 +90,7 @@ export function SourceManager({session,agents,api}:{session:PublicSession;agents
         <p>次回：{date(row.next_at)}<br/>最終成功：{date(row.last_success_at)}<br/>エラー：{row.last_error??'なし'}（連続 {row.failures} 回）</p>
         <button type="button" disabled={busy||locked||!row.enabled||row.working} onClick={()=>void operation(async()=>{await api(root+`/feeds/${row.id}/retry`,{});if(alive.current)setNotice('再取得を予約しました。停止中の会話は再開しません。');})}>再取得を予約</button>
       </article>)}
-      <small>定期取得を無効にしても既存資料は消えません。既存の配信を取り消すには資料側を無効にしてください。</small>
+      <small>再取得は資料ごとの個別配信先・配信停止を維持します。取得間隔の変更だけでは配信先を変更しません。フィードの配信先を明示的に変更すると既存資料にも適用します。定期取得の停止は既存資料を無効にしません。</small>
     </details>
   </section>;
 }
