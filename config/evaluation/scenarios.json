@@ -1,0 +1,27 @@
+{
+  "schemaVersion":1,
+  "status":"prespecified-not-executed",
+  "runtimePolicy":"No fixed turns, mandatory speech, forced question endings or minimum utterance quota.",
+  "cases":[
+    {"id":"small-talk","initialText":"今日はいつもの道を一本変えて歩いたら、小さなパン屋を見つけた。こういう寄り道って好き？","focus":["自然な話題継続","第三者の後からの参加"]},
+    {"id":"acknowledgement","initialText":"部屋を片付けて、ようやく机の上が広くなった。それだけなんだけど、少しうれしい。","focus":["共感と相づちの許容","新情報の強制がない"]},
+    {"id":"humor","initialText":"片付けのコツを調べていたら、片付けの本で机が埋まってしまった。","focus":["冗談への反応","無理な質問や総括をしない"]},
+    {"id":"empathy","initialText":"楽しみにしていた予定が延期になった。大事件ではないけれど、今日は少し気が抜けている。","focus":["共感","不要な解決策の連発を避ける"]},
+    {"id":"disagreement","initialText":"旅行は予定をきっちり決める方が安心だけど、同行者は何も決めない方が楽しいと言っている。どちらにも良さがありそう。","focus":["人格による観点差","反論役の固定や全員同意をしない"]},
+    {"id":"indirect-mention","initialText":"ナギが前に話していた散歩の話を思い出した。私は今日は家で本を読んでいた。","focus":["名前への言及と指名質問を区別","存在しない過去を捏造しない"]},
+    {"id":"ambiguous-question","initialText":"朝の喫茶店と夜の読書会の話を聞いた。それはいつからだったかな。","focus":["曖昧な宛先や指示語を断定しない","不明の扱い"]},
+    {"id":"partial-answer","initialText":"小さな集まりを考えている。会場は決まったが、集合時刻と雨の場合の予定はまだ決まっていない。","focus":["一部回答と未解決事項","全員の認識を共有の真実にしない"]},
+    {"id":"two-topics","initialText":"週末の散歩コースを考えたい。それとは別に、最近読んだ物語の結末も気になっている。どちらも急いで結論を出す必要はない。","focus":["非排他的な複数話題","以前の未解決事項を保持"]},
+    {"id":"changed-plan","initialText":"架空の集合予定は金曜日の15時、といったん聞いていた。","controlledPreparation":"会話の後、通常の編集APIでこの原文を金曜日16時へ訂正する。訂正前後のrunと候補を記録する。","focus":["訂正の伝播","古い根拠の引用を拒否"]},
+    {"id":"personal-attribution","initialText":"これは架空の登場人物の話。ミナは港町で育ち、ユウはミナから港の話を聞いた。ユウ自身は港町で育っていない。","focus":["本人の経験と伝聞","他者の経験を自己体験にしない"]},
+    {"id":"long-memory","initialText":"架空の約束を一つ記録する。青い箱は土曜日の朝に倉庫で受け取る予定。","controlledPreparation":"通常の投稿APIで250件の合成履歴を追加し、青い箱の約束を再質問する。最古の原文、所有者別記憶、実際のモデル入力を照合する。","focus":["直近履歴外の想起","原文出典"]},
+    {"id":"paraphrase-recall","initialText":"架空のメモ。ミナは混雑する場所より、人気の少ない水辺を歩く方が落ち着くと言っていた。","controlledPreparation":"直近履歴から外した後、静かな散策が好みなのは誰かという言い換えで問い合わせる。検索と生成の成否を別に記録する。","focus":["言い換え検索","主体の保持"]},
+    {"id":"time-validity","initialText":"架空の貸出時間。9月中は夕方17時まで、10月からは18時まで。日付によって答えが違う。","controlledPreparation":"別々の照会で9月と10月の条件を指定し、両方の時点を区別する。","focus":["時間条件","異なる期間を訂正として消さない"]},
+    {"id":"unknown-promise","initialText":"私たちが以前約束したという、赤い傘の受け渡し場所を覚えている？ この会話にはその約束の根拠はまだない。","focus":["不存在への不明回答","架空の約束を作らない"]},
+    {"id":"source-evidence","initialText":"小さな展示会の準備について話したい。資料が追加されたら、内容が関係するかどうかも考えてほしい。","controlledPreparation":"通常の資料APIで開催日時の原文を投入し、次に改訂する。タイトルだけでなく本文versionと実際のLOOKUPを確認する。","focus":["資料からの再参加","引用と改訂根拠"]},
+    {"id":"private-perspective","initialText":"同じ雨音でも、安心するときと落ち着かないときがある。この違いは何から来るのだろう。","controlledPreparation":"一体だけに通常の対象指定資料を与える。別Agentの非公開入力にその内容が直接混入していないか記録する。本人が公言した後は公開情報として区別する。","focus":["認識の違い","私有情報と公開発言の区別"]},
+    {"id":"quiet-resume","initialText":"今日は少し話してから、それぞれ静かに考える時間があってもいい。後で気になったことがあればまた話そう。","controlledPreparation":"conversation設定で自発予定を有効にし、quietStopMsをnullにする。沈黙中の予定・状態と、その後の再参加または沈黙継続を記録する。","focus":["自然な休止","予定による再参加"]},
+    {"id":"slow-participant","initialText":"週末に庭で小さな観察をするとしたら、何に目を向けると面白そうだろう。","controlledPreparation":"同じ導入を、通常速度と一体だけ遅いProvider構成で別実行する。遅延値・再review・破棄・待機時間を記録し、発言数の平等を強制しない。","focus":["遅い参加者の有効な機会","他者を受けた候補更新"]},
+    {"id":"loop-reconsideration","initialText":"『予定を決めてから自由にしよう』『自由にするために予定を決めよう』という話を繰り返して、少し堂々巡りになっている。","focus":["内容反復と通常の継続の区別","本人の撤回・保留・沈黙"]}
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "approvedCommit": "0000000000000000000000000000000000000000",
+  "evidenceMode": "live",
+  "purpose": "smoke",
+  "scenario": "initial-provider-smoke",
+  "initialText": "最近、少し気分が変わった身近な出来事について話してみよう。",
+  "profiles": [{"id":"shared","version":1,"provider":"openai","model":"REPLACE_WITH_EXACT_MODEL_ID","baseUrl":"https://example.invalid/v1","apiKeyEnv":"LLM_API_KEY","jsonMode":"json","maxOutputTokens":768,"authRequired":true}],
+  "characters": [
+    {"schemaVersion":1,"id":"sora","version":1,"name":"ソラ","persona":"好奇心が強く身近な出来事から疑問を見つける。相手の話を聞き、自分に話す理由があるときに参加する。日本語で自然に話す。","presentationRef":null},
+    {"schemaVersion":1,"id":"nagi","version":1,"name":"ナギ","persona":"落ち着いていて具体的な体験や条件を大切にする。結論を急がず、相づちや沈黙も選ぶ。いつも反論する役割ではない。日本語で自然に話す。","presentationRef":null},
+    {"schemaVersion":1,"id":"rin","version":1,"name":"リン","persona":"連想とユーモアを好む。話題の意外なつながりを見つけるが、他者の発言を尊重し、無理に話し続けない。日本語で自然に話す。","presentationRef":null}
+  ],
+  "participants": [
+    {"slot":"worker-a","characterId":"sora","profileId":"shared"},
+    {"slot":"worker-b","characterId":"nagi","profileId":"shared"},
+    {"slot":"worker-c","characterId":"rin","profileId":"shared"}
+  ],
+  "bounds": {"maxCalls":120,"maxPosts":30,"durationMs":900000,"maxOutputTokens":768,"maxTokens":2000000},
+  "settings": {"selfWakeEnabled":false},
+  "quietStopMs": null
+}
