@@ -68,7 +68,7 @@ jobs:
           import {join} from 'node:path';
           const file=join(process.env.RUNNER_TEMP,'mls-private','result.json');
           const data=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):null;
-          const result=data?{status:data.status,sha:data.commit,configHash:data.configHash,evidenceMode:data.evidenceMode,elapsedMs:data.elapsedMs,exitReason:data.exitReason,calls:data.usage.calls,publicPosts:data.usage.publicPosts,semanticAcceptance:'NOT_EVALUATED',privateRecordingRetained:false}:{status:'BLOCKED_OR_FAILED',sha:process.env.GITHUB_SHA,semanticAcceptance:'NOT_EVALUATED',privateRecordingRetained:false};
+          const result=data?{status:data.status,sha:data.commit,configHash:data.configHash,evidenceMode:data.evidenceMode,elapsedMs:data.elapsedMs,exitReason:data.exitReason,calls:data.usage.calls,publicPosts:data.usage.publicPosts,semanticAcceptance:'NOT_EVALUATED',recordingStatus:data.recordingStatus??'UNKNOWN',privateRecordingRetained:false,privateDatabaseRetained:false}:{status:'BLOCKED_OR_FAILED',sha:process.env.GITHUB_SHA,semanticAcceptance:'NOT_EVALUATED',recordingStatus:'NOT_SAVED',privateRecordingRetained:false,privateDatabaseRetained:false};
           mkdirSync('artifacts/live-summary',{recursive:true});writeFileSync('artifacts/live-summary/result.json',JSON.stringify(result,null,2));
           NODE
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
