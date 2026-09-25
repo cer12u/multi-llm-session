@@ -1,5 +1,8 @@
 import {z} from 'zod';
 import {execFileSync} from 'node:child_process';
+import {realpathSync} from 'node:fs';
+import {dirname,resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {ModelProfileSchema,CharacterSchema,SettingsSchema,Text,Slug} from '../contracts/index.js';
 import {credential,validateProfileUrl} from './credentials.js';
 import {hash} from '../domain/index.js';
@@ -18,9 +21,16 @@ export function experimentPreflight(input:unknown,env:NodeJS.ProcessEnv=process.
   const manifest=ExperimentSchema.parse(input),blockers:string[]=[];
   if(!import.meta.url.endsWith('.ts'))blockers.push('RUN_PINNED_SOURCE_WITH_TSX');
   let commit:string|null=null,repository:string|null=null;
-  try{commit=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();repository=execFileSync('git',['rev-parse','--show-toplevel'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();
-    execFileSync('git',['diff','--quiet','HEAD','--','apps','packages','deploy','package.json','package-lock.json','tsconfig.json'],{stdio:'ignore'});
-    if(execFileSync('git',['ls-files','--others','--exclude-standard','--','apps','packages','deploy'],{encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim())blockers.push('UNTRACKED_EXECUTABLE_SOURCE');
+  try{
+    // Validate the checkout containing THIS executable, never an unrelated shell working directory.
+    const source=realpathSync(fileURLToPath(import.meta.url)),root=resolve(dirname(source),'../..');
+    const git=(args:string[])=>execFileSync('git',['-C',root,...args],{encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();
+    repository=realpathSync(git(['rev-parse','--show-toplevel']));
+    if(repository!==root||source!==resolve(repository,'packages/config/experiment.ts'))blockers.push('EXECUTABLE_CHECKOUT_MISMATCH');
+    commit=git(['rev-parse','HEAD']);
+    git(['ls-files','--error-unmatch','packages/config/experiment.ts','apps/cli/experiment.ts','apps/cli/cluster.ts']);
+    git(['diff','--quiet','HEAD','--','apps','packages','deploy','package.json','package-lock.json','tsconfig.json']);
+    if(git(['ls-files','--others','--exclude-standard','--','apps','packages','deploy']))blockers.push('UNTRACKED_EXECUTABLE_SOURCE');
   }catch{blockers.push('BUILD_NOT_A_CLEAN_CHECKOUT');}
   if(commit!==manifest.approvedCommit)blockers.push('APPROVED_COMMIT_MISMATCH');
   if(manifest.evidenceMode==='live'&&env.ALLOW_LIVE_MODELS!=='1')blockers.push('LIVE_EXECUTION_NOT_ENABLED');

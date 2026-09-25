@@ -12,7 +12,7 @@ export async function startCluster(input:NodeJS.ProcessEnv=process.env,quiet=fal
   const slots=file.workerSlots??['a','b','c'].map(x=>({id:'worker-'+x,tokenEnv:'WORKER_'+x.toUpperCase()+'_TOKEN'}));
   for(const slot of slots)env[slot.tokenEnv]=env[slot.tokenEnv]??randomBytes(32).toString('hex');
   const ts=import.meta.url.endsWith('.ts');
-  const launch=(relative:string,childEnv:NodeJS.ProcessEnv)=>spawn(process.execPath,[...ts?['--import','tsx']:[],fileURLToPath(new URL(relative+(ts?'.ts':'.js'),import.meta.url))],{env:childEnv,stdio:quiet?'ignore':'inherit'});
+  const launch=(relative:string,childEnv:NodeJS.ProcessEnv)=>spawn(process.execPath,[...ts?['--import',import.meta.resolve('tsx')]:[],fileURLToPath(new URL(relative+(ts?'.ts':'.js'),import.meta.url))],{env:childEnv,stdio:quiet?'ignore':'inherit'});
   const children:ChildProcess[]=[launch('../core/main',env)];
   let stopped=false;
   const stop=async()=>{
