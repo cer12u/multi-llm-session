@@ -1,3 +1,4 @@
+import {continuityFingerprint} from '../../packages/observability/continuity.js';
 import {Readable} from 'node:stream';
 import type {FastifyInstance,FastifyRequest} from 'fastify';
 import {z} from 'zod';
@@ -12,6 +13,9 @@ export function registerObservabilityRoutes(app:FastifyInstance,service:SessionS
     authorize(req,false);const {id}=params.parse(req.params);
     reply.header('content-disposition',`attachment; filename="transcript-${id}.json"`);
     return publicTranscript(service,id);
+  });
+  app.get('/v1/sessions/:id/continuity-fingerprint',async req=>{
+    authorize(req,true);const {id}=params.parse(req.params);return continuityFingerprint(service,id);
   });
   app.get('/v1/sessions/:id/diagnostic-runs',async req=>{
     authorize(req,true);const {id}=params.parse(req.params),options=z.object({before:z.coerce.number().int().nonnegative().optional(),limit:z.coerce.number().int().min(1).max(50).optional()}).strict().parse(req.query);

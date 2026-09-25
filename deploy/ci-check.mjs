@@ -4,7 +4,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 const stage = process.argv[2];
 const commands = {
   install: ['npm', ['ci']], typecheck: ['npm', ['run', 'typecheck']], tests: ['npm', ['test']],
-  build: ['npm', ['run', 'build']], schemas: ['node', ['dist/apps/cli/schema.js']],
+  build: ['npm', ['run', 'build']], schemas: ['node', ['dist/apps/cli/schema.js', '--check']],
   lab: ['npm', ['run', 'lab']], browser: ['npx', ['playwright', 'install', '--with-deps', 'chromium']],
   e2e: ['npm', ['run', 'test:e2e']],
 };

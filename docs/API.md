@@ -1,80 +1,63 @@
 # API契約 v1
 
-実行時に検証する定義は `packages/contracts/index.ts`、HTTP境界は `apps/core/server.ts` です。`node dist/apps/cli/schema.js` でJSON Schemaを `artifacts/contracts/` へ出力できます。Schemaだけでは表現しない、所有者・セッション一致・現行世代・返信先の実在などもCoreが検査します。
+実行時の構造定義は`packages/contracts/`、HTTP登録は`apps/core/server.ts`と`*-routes.ts`です。Zodの構造検査に加え、Coreは所有者/世代/出典version/実在/予算を検証します。
 
-## 認証
+## 認証・再送
 
-ブラウザーはPOST `/v1/auth/login` に `{ "token": "入力したログイントークン" }` を送信します。成功するとHttpOnly/SameSite=Strict cookieと `{role, csrf}` を返します。書き込みでは同一Originと `X-CSRF-Token` を要求します。GET `/v1/auth/me` でログイン状態、POST `/v1/auth/logout` でログアウトできます。
+`POST /v1/auth/login`にtokenを送るとHttpOnly/SameSite=Strict cookieとrole/csrfを返します。cookie書込には同一Origin/X-CSRF-Tokenが必要です。CLIはADMIN_TOKEN、閲覧者はVIEWER_TOKEN、Workerは本人のWORKER_TOKENをBearerで渡します。URLへ鍵を含めません。
 
-CLIは `Authorization: Bearer <ADMIN_TOKEN>`、閲覧専用はVIEWER_TOKEN、Workerは自分のWORKER_TOKENを使います。URLにトークンを含めません。公開Host/Originを検査し、管理者・閲覧者・Workerの認証は互換にしません。内部コンテナ通信では正しいWorker認証を持つ `/v1/worker/` に限り内部Hostを認めます。
+セッションcommandはIdempotency-Keyを使います。同じscope/key/bodyは同じ結果、異なるbodyは409です。lifecycleの異なる操作には異なるキーを使います。人格/profileは不変ID/versionで重複を制御します。Host/Origin/CSRF/本人run認証を迂回しません。
 
-## 操作者向け操作
+以下の`...`は`/v1/sessions/:id`です。管理操作と私有読取はoperator限定、公開読取はviewerも可能です。
 
-| Method / Path | 本文・意味 |
+## 公開会話と状態
+
+| Method / path | 内容 |
 |---|---|
-| GET /v1/capabilities | 利用可能なprofile ID、worker slot、初期設定。秘密のURL/鍵は返しません |
-| GET /v1/characters | 最新版の定義。閲覧者にはpersonaを返しません |
-| POST /v1/characters | CharacterSchema。既存versionは上書き不可 |
-| GET /v1/sessions | 公開セッション一覧 |
-| POST /v1/sessions | SessionCreateSchema。DRAFTを作成 |
-| POST /v1/sessions/:id/start,pause,resume,end | 各々独立したパス。本文 `{}` |
-| POST /v1/sessions/:id/settings | SettingsSchema全体。DRAFT/PAUSED限定 |
-| POST /v1/sessions/:id/members | `{agentId, enabled}`。DRAFT/PAUSED限定 |
-| POST /v1/sessions/:id/messages | `{text, replyTo: nullまたはmessage ID, addressedTo: [agent ID]}` |
-| POST /v1/sessions/:id/messages/:messageId | `{text: 新本文}` で自分側の人間発言を編集。`{text:null}` は削除 |
-| POST /v1/sessions/:id/sources | `{title,text,url?,publishedAt?}`。会話への投稿ではなく資料追加 |
-| GET /v1/sessions/:id/snapshot | セッション・参加者・最近200件の公開メッセージ・cursor |
-| GET /v1/sessions/:id/events?cursor=... | SSE。Last-Event-IDがあれば優先 |
-| GET /v1/sessions/:id/search?q=... | 元発言の検索、最大50件 |
-| GET /v1/sessions/:id/archive/:messageId | 元発言。削除済みは410 |
-| GET /v1/sessions/:id/diagnostics | 管理者限定。未投稿候補、run、cursor、trace、metrics |
-| GET /v1/sessions/:id/export | 管理者限定。manifest、確定会話、metricsのJSON |
-| GET /v1/sessions/:id/commands/:operation/:key | 管理者限定。結果不明時の冪等操作結果照会 |
+| GET /v1/capabilities | profile概要、Worker slot、初期設定 |
+| GET /v1/characters | 最新定義。viewerにはpersonaなし |
+| GET/POST /v1/sessions | 公開一覧 / SessionCreateSchemaからDRAFT作成 |
+| POST .../start、/pause、/resume、/end | 本文{}。操作ごとに別パス |
+| POST .../settings | SettingsSchema全体、DRAFT/PAUSED |
+| POST .../messages | MessageInputSchema。text/replyTo/addressedTo/任意act |
+| POST .../messages/:messageId | 人間本文の編集text、削除text:null。Bot本文の書換え不可 |
+| GET .../snapshot | 公開状態、初回履歴、historyCursor、SSE cursor |
+| GET .../history、/threads/:messageId、/search-page?q=... | cursor/limit(1〜200)、items/highWater/nextCursor |
+| GET .../search?q=... | 互換の先頭50件検索。追加取得はsearch-page |
+| GET .../archive/:messageId | 元原文。削除済み410 |
+| POST .../messages/lookup | 公開原文の一括読取{ids:[UUID...]}、最大200 |
+| GET .../events?cursor=... | 公開SSE。Last-Event-IDがあれば優先 |
+| GET .../transcript | 公開許可フィールドだけの会話出力 |
+| GET .../export | 互換のoperator限定公開会話出力。私有診断ではない |
 
-セッション変更操作には `Idempotency-Key` を必須とします。UUIDを推奨し、許可文字は英数字・`_.:-`、8〜128文字です。同じscope/key/bodyは同じ結果、同じscope/keyで本文を変えると409です。lifecycleは全actionで同じscopeを使用するため、pauseとresumeは違うkeyにします。キャラクター登録はid/versionによる不変性検査で重複を制御します。
+検索の編集失効は409 PAGE_RESYNC_REQUIREDです。SSEはsessionUUID:eventIDのcursorを使い、不正/未来/別sessionは409です。表示側はsnapshot/pageから復旧し、受信回数を推論トリガにしません。
 
-### セッション作成の最小例
+## 管理API
 
-```json
-{
-  "title": "自由な会話",
-  "participants": [
-    {"characterId":"sora","profileId":"mock","slot":"worker-a"},
-    {"characterId":"nagi","profileId":"mock","slot":"worker-b"},
-    {"characterId":"rin","profileId":"mock","slot":"worker-c"}
-  ]
-}
-```
-
-レスポンスは `{id}`。slotは異なるものを3個以上指定します。別セッションに同じcharacter IDを使っても個体IDは新規です。
-
-## Worker操作
-
-Worker tokenからslotを確定します。BodyでslotやAgentの所有権を変更できません。
-
-| Method / Path | 本文 |
+| 範囲 | パスと契約 |
 |---|---|
-| POST /v1/worker/register | `{}` → `{epoch}` |
-| POST /v1/worker/claim | `{epoch}` → nullまたはClaimedRun |
-| POST /v1/worker/runs/:id/heartbeat | `{epoch,token}` |
-| POST /v1/worker/runs/:id/calls | `{epoch,token,requestKey,stage:"primary"または"repair"}` → `{id}` |
-| POST /v1/worker/runs/:id/calls/:callId | `{token,usage:{inputTokens,outputTokens},error}` |
-| POST /v1/worker/runs/:id/result | `{epoch,token,output}` |
-| POST /v1/worker/runs/:id/failure | `{epoch,token,code}` |
-| GET /v1/worker/agents/:id/memory | 自分の個体の記憶のみ |
-| GET /v1/worker/agents/:id/archive?q=... | 自分のセッションに限定した検索 |
-| GET /v1/worker/agents/:id/archive/:messageId | 自分のセッションに限定した原文取得 |
+| Character | GET `/v1/characters/:characterId/versions`、`.../versions/:version`、`.../versions/:version/export`。POST `/v1/characters/validate`・`/import`はCharacterSchema |
+| Provider | GET `/v1/provider-catalog`、`/v1/model-profiles/:profile/versions`。POST `/v1/model-profiles`はModelProfileSchema、POST `.../:profile/versions/:version/retry`は{} |
+| Participation | GET/POST `.../membership`、POST `.../clone`。MembershipUpdateSchema/SessionCloneSchema。GET `.../episodes`は公開メタデータ |
+| Source | POST/GET `.../sources`、GET `.../sources/:source`・`/versions`・`/versions/:version`、POST `.../sources/:source`はSourceUpdateSchema。原文版とaudienceを検査 |
+| Feed | GET `/v1/source-configurations`、GET/POST `.../feeds`、POST `.../feeds/:source/retry`。FeedSubscriptionSchema |
+| Usage | GET `.../usage`、POST `.../budget-policy`はBudgetPolicyUpdateSchema、POST `.../budget`は明示更新{} |
+| Recovery | POST `.../agents/:agentId/retry`。定義の最新値へ勝手に切り替えず、旧runを失効 |
+| Diagnostics | GET `.../operations`・`/diagnostics`・`/diagnostic-runs`・`/diagnostic-runs/:run`・`/diagnostic-export`・`/continuity-fingerprint`。exportは管理者専用の私有NDJSON、fingerprintは現在の状態/記憶/出典/カーソル/予定の件数と全列SHA-256 |
+| Receipt | GET `.../commands/:operation/:key`。結果不明commandの照会 |
 
-ClaimedRunはid/token/kind/workerEpoch/sessionEpoch/leaseMs/timeoutMs/contextChars/profile/contextを含みます。profileには鍵そのものを含めず、Workerが参照する環境変数名を指定します。同一slotで有効runは最大1件です。claimの応答が失われたとき、同じepochの再要求では同じrunを返します。
+人格/モデル版を同じ個体へ適用する場合と置換する場合で、私有経験の扱いは異なります。予算方針保存、予算更新、再開は別です。資料の対象外通知を本人の観測済みとして扱いません。詳細は各機能仕様を参照してください。
 
-resultは事前のモデル呼出記録を必要とし、runごとのJSON Schemaに検証します。呼び出し失敗・形式修復も予算に含めます。usage不明はnullです。外部推論が止まったと確認できない予約は、保守的に期限まで占有として扱います。
+## Worker契約
 
-## SSE
+`POST /v1/worker/register`は{}→epoch、`POST /claim`はepoch→nullまたはClaimedRunです。`/v1/worker/runs/:id`以下にheartbeat、calls、calls/:callId、lookup、result、failureがあります。
 
-データは `id: sessionUUID:eventID` と `data: JSON` の組です。JSONはid/sessionId/kind/revision/createdAt/dataと、発言イベントであればmessageを含みます。候補や私有記憶は含みません。Agentの考えた本文を途中ストリーミングしません。
+run操作はepoch/tokenと所有slotを検査します。call予約はrequestKeyとstage(primary/lookup/repair)、settlementはusage(inputTokens/outputTokens、各null可)とerrorを受けます。lookupはrequestKey/requestsを受け、元の観測bindingを保ったまま現在の所有権・出典versionを検査します。成功resultの再送で状態を二重適用しません。
 
-cursorが別セッション/未来/不正形式なら409 RESYNC_REQUIREDです。表示Clientはfresh snapshotから再接続します。画面側はメッセージIDで置換し、通知回数を発言件数やLLMトリガとして扱いません。
+互換の`GET /v1/worker/agents/:id/memory`、archive検索、archive原文取得にも、現在の有効run、未失効lease、Worker/session世代、RUNNING、非retired本人を要求します。再利用したslotは過去個体の記憶への権限ではありません。
 
-## 代表的なエラー
+## 生成契約・エラー
 
-400/422は構造違反、401は認証不足、403は所有権/操作権/Origin/CSRF違反、404は存在しない資源、409はSTALE_WORKER/STALE_RUN/STALE_CANDIDATE/IDEMPOTENCY_CONFLICT/INVALID_LIFECYCLE/RESYNC_REQUIRED等、410は削除済み原文、429はProvider同時枠やログイン制限です。本文は `{code}` を基本にします。Providerの生のエラー本文や鍵を返しません。
+`node dist/apps/cli/schema.js --check`は31個の生成JSON Schemaを`config/schema-baseline.json`の検証済みhashと照合し、差分で失敗します。変更時は生成差分のレビュー後に一覧を更新します。これは全HTTP APIのOpenAPI生成ではなく、Zodで表現できる構造の検査です。所有者・現在版・世代は実行時検査を維持します。
+
+401は認証、403は権限/Origin/CSRF、404は不存在、409は世代/状態/再送競合、410は削除原文、413はサイズ、422は構造、429は同時枠等です。本文は安全なcodeを基本とし、Providerの生のエラーや鍵を公開しません。
