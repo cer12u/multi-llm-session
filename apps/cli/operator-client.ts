@@ -40,6 +40,7 @@ export async function operatorCommand(args:string[],env:NodeJS.ProcessEnv=proces
     case 'members-apply':path=`/v1/sessions/${session()}/membership`;method='POST';body=JSON.parse(readFileSync(arg,'utf8'));break;
     case 'clone':path=`/v1/sessions/${session()}/clone`;method='POST';body=JSON.parse(readFileSync(arg,'utf8'));break;
     case 'transcript':path=`/v1/sessions/${session()}/transcript`;break;
+    case 'continuity-fingerprint':path=`/v1/sessions/${session()}/continuity-fingerprint`;break;
     case 'diagnostic-runs':path=`/v1/sessions/${session()}/diagnostic-runs`;break;
     case 'diagnostic-run':path=`/v1/sessions/${session()}/diagnostic-runs/${encodeURIComponent(Id.parse(arg))}`;break;
     case 'export':path=`/v1/sessions/${session()}/export`;break;
@@ -52,7 +53,7 @@ export async function operatorCommand(args:string[],env:NodeJS.ProcessEnv=proces
     case 'say':path=`/v1/sessions/${session()}/messages`;method='POST';body={text:arg};break;
     case 'source':path=`/v1/sessions/${session()}/sources`;method='POST';body=JSON.parse(readFileSync(arg,'utf8'));break;
     case 'search':path=`/v1/sessions/${session()}/search?q=${encodeURIComponent(arg)}`;break;
-    default:throw new Error('Usage: characters | character-validate/character-import FILE | character-versions ID | character-get/character-export ID VERSION | history SESSION [CURSOR] | original SESSION MESSAGE | thread SESSION MESSAGE [CURSOR] | search-page SESSION QUERY [CURSOR] | usage SESSION | budget-policy SESSION FILE | transcript/diagnostic-runs SESSION | diagnostic-run SESSION RUN | source-configurations | sources/feeds SESSION | source-get/source-versions/feed-retry SESSION SOURCE_OR_FEED_UUID | source-update SESSION SOURCE_UUID FILE | feed-save SESSION FILE | list | create FILE | profiles | profile-versions PROFILE | profile-save FILE | members/episodes/operations/status/start/pause/resume/end/export/budget SESSION | members-apply/clone SESSION FILE | retry-agent SESSION AGENT | retry-provider PROFILE VERSION | say/search SESSION TEXT | source SESSION FILE');
+    default:throw new Error('Usage: characters | character-validate/character-import FILE | character-versions ID | character-get/character-export ID VERSION | history SESSION [CURSOR] | original SESSION MESSAGE | thread SESSION MESSAGE [CURSOR] | search-page SESSION QUERY [CURSOR] | usage SESSION | budget-policy SESSION FILE | transcript/diagnostic-runs/continuity-fingerprint SESSION | diagnostic-run SESSION RUN | source-configurations | sources/feeds SESSION | source-get/source-versions/feed-retry SESSION SOURCE_OR_FEED_UUID | source-update SESSION SOURCE_UUID FILE | feed-save SESSION FILE | list | create FILE | profiles | profile-versions PROFILE | profile-save FILE | members/episodes/operations/status/start/pause/resume/end/export/budget SESSION | members-apply/clone SESSION FILE | retry-agent SESSION AGENT | retry-provider PROFILE VERSION | say/search SESSION TEXT | source SESSION FILE');
   }
   const response=await fetcher(new URL(path,base),{method,redirect:'error',headers:{authorization:'Bearer '+token,'content-type':'application/json','idempotency-key':env.IDEMPOTENCY_KEY??randomUUID()},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});
   return {ok:response.ok,body:await response.text()};

@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {startCluster} from './cluster.js';
-import {ReplayStream} from '../../packages/observability/replay.js';
+import type {ContinuityFingerprint} from '../../packages/observability/continuity.js';
 import type {Context,Intent,Snapshot,PublicMessage,Page} from '../../packages/contracts/index.js';
 import type {SessionService} from '../../packages/session-service/index.js';
 
@@ -54,12 +54,16 @@ const samples:{elapsedMs:number;databaseBytes:number;walBytes:number;agents:Usag
 let restartMs:number|null=null,elapsedMs=0,final:Usage|undefined,outcome='FAILED',failure:string|null=null;
 const originalIds:string[]=[],events:{elapsedMs:number;kind:string}[]=[],windows=new Set<string>();
 let firstOwners:string[]=[];let statePreserved=false,memoryPreserved=false,originalsVerified=false;
+let continuityBefore:ContinuityFingerprint|undefined,continuityAfter:ContinuityFingerprint|undefined;
+let fullExportProbe:{status:number;code:string}|undefined;
 try{
   await new Promise<void>(r=>provider.listen(0,'127.0.0.1',r));const endpoint=(provider.address() as {port:number}).port,corePort=await port();
   const profiles=Array.from({length:3},(_,i)=>({id:'soak-'+i,provider:'openai',model:'synthetic-soak-'+i,baseUrl:`http://127.0.0.1:${endpoint}/v1`,jsonMode:'json',maxOutputTokens:128,authRequired:true,apiKeyEnv:'SYNTHETIC_SOAK_KEY_'+i,allowLocalHttp:true,failureThreshold:1,circuitCooldownMs:1000}));
   const config=join(root,'config.json');writeFileSync(config,JSON.stringify({profiles}),{mode:0o600});
   const env:NodeJS.ProcessEnv={PATH:process.env.PATH,HOME:process.env.HOME,APP_CONFIG:config,APP_BIND:'127.0.0.1',PORT:String(corePort),PUBLIC_ORIGIN:`http://127.0.0.1:${corePort}`,DB_PATH:dbPath,ALLOW_LIVE_MODELS:'1',RESTART_POLICY:'paused',BUILD_SHA:process.env.GITHUB_SHA??'local',DIAGNOSTIC_EVIDENCE_MODE:'synthetic'};
   profiles.forEach((p,i)=>{env[p.apiKeyEnv]='synthetic-soak-key-'+i;});
+  env.VIEWER_TOKEN='synthetic-soak-viewer-read-only-000000';
+  env.WORKER_A_TOKEN='synthetic-soak-worker-a-auth-only-000000';
   const bindings=Object.fromEntries(['a','b','c'].map((s,i)=>['worker-'+s,[profiles[i].apiKeyEnv]]));
   cluster=await startCluster(env,true,bindings);
   const api=async<T=any>(path:string,body?:unknown):Promise<T>=>{
@@ -77,7 +81,18 @@ try{
   await api(rootPath+'/start',{});const started=Date.now(),deadline=started+seconds*1000;
   let nextInput=started,nextSample=started,faultStarted=false,faultRecovered=false,restarted=false,sequence=0;
   const waitFor=async(check:()=>Promise<boolean>,code:string,ms=limits.drainDeadlineMs)=>{const end=Date.now()+ms;while(Date.now()<end){assert.equal(providerFailure,null);if(await check())return;await sleep(200);}throw new Error(code);};
-  const recording=async()=>{const response=await fetch(cluster!.base+rootPath+'/diagnostic-export',{headers:{authorization:'Bearer '+cluster!.token},signal:AbortSignal.timeout(60000)});assert(response.ok,'SOAK_RECORDING_FAILED');const parser=new ReplayStream();for(const line of (await response.text()).trimEnd().split('\n'))parser.push(line);return parser.finish();};
+  const fingerprint=async()=>{
+    const value=await api<ContinuityFingerprint>(rootPath+'/continuity-fingerprint');
+    assert.equal(value.kind,'private-continuity-fingerprint','SOAK_FINGERPRINT_KIND');
+    assert.equal(value.sessionId,id,'SOAK_FINGERPRINT_SESSION');
+    assert.equal(value.tables.length,9,'SOAK_FINGERPRINT_TABLES');
+    assert(value.tables.every(t=>/^[a-f0-9]{64}$/.test(t.sha256)),'SOAK_FINGERPRINT_HASH');
+    return value;
+  };
+  for(const token of [null,env.VIEWER_TOKEN,env.WORKER_A_TOKEN]){
+    const denied=await fetch(cluster!.base+rootPath+'/continuity-fingerprint',{headers:token?{authorization:'Bearer '+token}:{},signal:AbortSignal.timeout(10000),redirect:'error'});
+    assert.equal(denied.status,token===env.VIEWER_TOKEN?403:401,'SOAK_FINGERPRINT_AUTH');await denied.body?.cancel();
+  }
   while(Date.now()<deadline){
     elapsedMs=Date.now()-started;assert.equal(providerFailure,null);
     if(!faultStarted&&elapsedMs>=seconds*200){faultStarted=true;injected=true;events.push({elapsedMs,kind:'INJECT_ONE_PROVIDER_429'});}
@@ -85,12 +100,23 @@ try{
     if(!restarted&&elapsedMs>=seconds*500){
       await waitFor(async()=>{const u=await api<Usage>(rootPath+'/usage');return u.calls.every(c=>c.inflight===0)&&u.runtime.agents.every(a=>a.input.memoryPending===0&&a.input.observationPending===0);},'SOAK_PRE_RESTART_DRAIN');
       await api(rootPath+'/pause',{});
-      const before=await recording();const state=before.state.find(t=>t.table==='agent_private_states')!,memory=before.state.find(t=>t.table==='memories')!;
-      assert.equal(state.rows.length,3);assert(memory.rows.length>=3,'SOAK_MEMORY_WAS_NOT_WRITTEN');
+      // Whole historical exports deliberately retain their existing size limit.
+      // Recovery checks must not require exporting every past model request.
+      const probe=await fetch(cluster!.base+rootPath+'/diagnostic-export',{headers:{authorization:'Bearer '+cluster!.token},signal:AbortSignal.timeout(60000),redirect:'error'});
+      if(!probe.ok){
+        const result=await probe.json() as {code?:string};
+        assert.equal(probe.status,413,'SOAK_EXPORT_UNEXPECTED_STATUS');assert.equal(result.code,'DIAGNOSTIC_SIZE_LIMIT','SOAK_EXPORT_UNEXPECTED_FAILURE');
+        fullExportProbe={status:probe.status,code:result.code};
+      }else{await probe.body?.cancel();fullExportProbe={status:probe.status,code:'HEADERS_ONLY_NOT_REPLAYED'};}
+      continuityBefore=await fingerprint();
+      const state=continuityBefore.tables.find(t=>t.table==='agent_private_states')!,memory=continuityBefore.tables.find(t=>t.table==='memories')!;
+      assert.equal(state.rows,3);assert(memory.rows>=3,'SOAK_MEMORY_WAS_NOT_WRITTEN');
       const restarting=Date.now();cluster!.children[0].kill('SIGKILL');await cluster!.stop();cluster=await startCluster(env,true,bindings);restartMs=Date.now()-restarting;
       assert(restartMs<=limits.maxRestartMs,'SOAK_RESTART_LIMIT');
       assert.equal((await api<Snapshot>(rootPath+'/snapshot')).session.lifecycle,'PAUSED');
-      const after=await recording();assert.deepEqual(after.state.find(t=>t.table==='agent_private_states'),state);assert.deepEqual(after.state.find(t=>t.table==='memories'),memory);
+      continuityAfter=await fingerprint();
+      assert.deepEqual(continuityAfter.tables,continuityBefore.tables,'SOAK_CONTINUITY_MISMATCH');
+      assert.equal(continuityAfter.databaseSchema,continuityBefore.databaseSchema,'SOAK_SCHEMA_CHANGED');
       statePreserved=true;memoryPreserved=true;
       const stoppedCalls=(await api<Snapshot>(rootPath+'/snapshot')).session.calls;await sleep(windowMs+500);
       const paused=await api<Snapshot>(rootPath+'/snapshot');assert.equal(paused.session.lifecycle,'PAUSED');assert.equal(paused.session.calls,stoppedCalls,'SOAK_RESTART_AUTO_RESUMED');
@@ -120,6 +146,6 @@ try{
 finally{
   await cluster?.stop();provider.closeAllConnections();await new Promise<void>(r=>provider.close(()=>r()));
   mkdirSync(resolve(reportPath,'..'),{recursive:true});
-  writeFileSync(reportPath,JSON.stringify({schemaVersion:1,mode:'synthetic-operational-e2e',outcome,failure,commit:process.env.GITHUB_SHA??'local',limits,elapsedMs,viewerConnections:0,workerProcesses:3,providerDelaysMs:[20,20,100],requests,faults,ownerCalls:[...ownerRequests.values()],restartMs,originalCount:originalIds.length,originalsVerified,statePreserved,memoryPreserved,observedWindows:windows.size,events,samples,usage:final??null,semanticAcceptance:'NOT_EVALUATED',liveModelCalls:0,longerDurationGuarantee:false},null,2));
+  writeFileSync(reportPath,JSON.stringify({schemaVersion:1,mode:'synthetic-operational-e2e',outcome,failure,commit:process.env.GITHUB_SHA??'local',limits,elapsedMs,viewerConnections:0,workerProcesses:3,providerDelaysMs:[20,20,100],requests,faults,ownerCalls:[...ownerRequests.values()],restartMs,originalCount:originalIds.length,originalsVerified,statePreserved,memoryPreserved,continuityBefore,continuityAfter,fullExportProbe,observedWindows:windows.size,events,samples,usage:final??null,semanticAcceptance:'NOT_EVALUATED',liveModelCalls:0,longerDurationGuarantee:false},null,2));
   rmSync(root,{recursive:true,force:true});console.log(JSON.stringify({outcome,elapsedMs,originals:originalIds.length,requests,faults,restartMs,semanticAcceptance:'NOT_EVALUATED'}));
 }

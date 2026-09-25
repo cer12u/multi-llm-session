@@ -30,6 +30,12 @@ test('R10-DELIVERY-E2E: documented character, archive and paging CLI commands us
     expect((await call(['thread',id,message.id])).rootId).toBe(message.id);
     expect((await call(['search-page',id,'CLI_ORIGINAL_MARKER'])).items.map((m:{id:string})=>m.id)).toEqual([message.id]);
     expect((await call(['usage',id])).calls).toEqual([]);
+    const fingerprint=await call(['continuity-fingerprint',id]);
+    expect(fingerprint.kind).toBe('private-continuity-fingerprint');expect(fingerprint.sessionId).toBe(id);
+    expect(fingerprint.tables).toHaveLength(9);expect(JSON.stringify(fingerprint)).not.toContain(character.persona);
+    expect((await call(['continuity-fingerprint',id])).tables).toEqual(fingerprint.tables);
+    expect((await invoke(['continuity-fingerprint',id],viewer)).status).not.toBe(0);
+    expect((await call(['usage',id])).calls).toEqual([]);
     const read=await invoke(['history',id],viewer);expect(read.status).toBe(0);expect(read.out).not.toContain(character.persona);
     expect((await invoke(['character-export',character.id,'1'],viewer)).status).not.toBe(0);
     await call(['end',id]);
