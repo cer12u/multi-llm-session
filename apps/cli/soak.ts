@@ -81,7 +81,7 @@ try{
   await api(rootPath+'/start',{});const started=Date.now(),deadline=started+seconds*1000;
   let nextInput=started,nextSample=started,faultStarted=false,faultRecovered=false,restarted=false,sequence=0;
   const waitFor=async(check:()=>Promise<boolean>,code:string,ms=limits.drainDeadlineMs)=>{const end=Date.now()+ms;while(Date.now()<end){assert.equal(providerFailure,null);if(await check())return;await sleep(200);}throw new Error(code);};
-  const fingerprint=async()=>{
+  const fingerprint=async():Promise<ContinuityFingerprint>=>{
     const value=await api<ContinuityFingerprint>(rootPath+'/continuity-fingerprint');
     assert.equal(value.kind,'private-continuity-fingerprint','SOAK_FINGERPRINT_KIND');
     assert.equal(value.sessionId,id,'SOAK_FINGERPRINT_SESSION');
@@ -90,7 +90,7 @@ try{
     return value;
   };
   for(const token of [null,env.VIEWER_TOKEN,env.WORKER_A_TOKEN]){
-    const denied=await fetch(cluster!.base+rootPath+'/continuity-fingerprint',{headers:token?{authorization:'Bearer '+token}:{},signal:AbortSignal.timeout(10000),redirect:'error'});
+    const denied:Response=await fetch(cluster!.base+rootPath+'/continuity-fingerprint',{headers:token?{authorization:'Bearer '+token}:{},signal:AbortSignal.timeout(10000),redirect:'error'});
     assert.equal(denied.status,token===env.VIEWER_TOKEN?403:401,'SOAK_FINGERPRINT_AUTH');await denied.body?.cancel();
   }
   while(Date.now()<deadline){
@@ -102,7 +102,7 @@ try{
       await api(rootPath+'/pause',{});
       // Whole historical exports deliberately retain their existing size limit.
       // Recovery checks must not require exporting every past model request.
-      const probe=await fetch(cluster!.base+rootPath+'/diagnostic-export',{headers:{authorization:'Bearer '+cluster!.token},signal:AbortSignal.timeout(60000),redirect:'error'});
+      const probe:Response=await fetch(cluster!.base+rootPath+'/diagnostic-export',{headers:{authorization:'Bearer '+cluster!.token},signal:AbortSignal.timeout(60000),redirect:'error'});
       if(!probe.ok){
         const result=await probe.json() as {code?:string};
         assert.equal(probe.status,413,'SOAK_EXPORT_UNEXPECTED_STATUS');assert.equal(result.code,'DIAGNOSTIC_SIZE_LIMIT','SOAK_EXPORT_UNEXPECTED_FAILURE');

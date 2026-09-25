@@ -43,7 +43,7 @@
 | Feed | GET `/v1/source-configurations`、GET/POST `.../feeds`、POST `.../feeds/:source/retry`。FeedSubscriptionSchema |
 | Usage | GET `.../usage`、POST `.../budget-policy`はBudgetPolicyUpdateSchema、POST `.../budget`は明示更新{} |
 | Recovery | POST `.../agents/:agentId/retry`。定義の最新値へ勝手に切り替えず、旧runを失効 |
-| Diagnostics | GET `.../operations`・`/diagnostics`・`/diagnostic-runs`・`/diagnostic-runs/:run`・`/diagnostic-export`。最後は管理者専用の私有NDJSON |
+| Diagnostics | GET `.../operations`・`/diagnostics`・`/diagnostic-runs`・`/diagnostic-runs/:run`・`/diagnostic-export`・`/continuity-fingerprint`。exportは管理者専用の私有NDJSON、fingerprintは現在の状態/記憶/出典/カーソル/予定の件数と全列SHA-256 |
 | Receipt | GET `.../commands/:operation/:key`。結果不明commandの照会 |
 
 人格/モデル版を同じ個体へ適用する場合と置換する場合で、私有経験の扱いは異なります。予算方針保存、予算更新、再開は別です。資料の対象外通知を本人の観測済みとして扱いません。詳細は各機能仕様を参照してください。
