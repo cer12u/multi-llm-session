@@ -1,3 +1,4 @@
+import {DiagnosticExplorer} from './diagnostic-explorer.js';
 import React, {useEffect,useRef,useState} from 'react';
 import {operationLabels,type AgentOperation,type Operations} from '../../../packages/contracts/operations.js';
 import {SessionMembers} from './session-members.js';
@@ -50,6 +51,7 @@ export function OperationsPanel({sessionId,api,refresh}:{sessionId:string;api:Ap
         <p>未処理：観測 {row.observationPending} · 記憶 {row.memoryPending} ／ 候補 {row.candidateState??'なし'}</p>
         {buttons(row)}
       </article>)}
+      <DiagnosticExplorer sessionId={sessionId} api={api}/>
     </>}
   </section>;
 }
