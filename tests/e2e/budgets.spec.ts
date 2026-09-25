@@ -49,6 +49,8 @@ test('R8-BUDGET-E2E: reservations, unknown usage, shared scope, renewal, real re
     await expect.poll(async()=>(await usage(id)).calls.reduce((n:number,c:{inflight:number})=>n+c.inflight,0)).toBe(0);
     const unknown=await usage(id);expect(unknown.calls.reduce((n:number,c:{calls:number})=>n+c.calls,0)).toBe(3);expect(unknown.window.tokens).toBeGreaterThan(0);
     expect(unknown.calls.every((c:{reportedInput:number|null;missingInput:number})=>c.reportedInput===null&&c.missingInput>0)).toBe(true);
+    const beforeQueued=requests;const queued=await api(`/v1/sessions/${id}/messages`,{text:'new input while the budget remains paused'});originalIds.push(queued.id);
+    expect((await snapshot(id)).session.activity).toBe('BUDGET_PAUSED');expect(requests).toBe(beforeQueued);
     // Configure through the real production form, rather than writing a service field or test-only API.
     await page.goto(base+'/?session='+id);await page.getByLabel('ログイントークン').fill(admin);await submitLogin(page,'管理者');
     await page.getByRole('button',{name:'セッション設定',exact:true}).click();await page.getByRole('button',{name:'診断',exact:true}).click();const panel=page.getByRole('region',{name:'運用予算と消費量'});
