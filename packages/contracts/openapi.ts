@@ -31,7 +31,7 @@ const record=z.object({}).passthrough();
 const memory=z.object({id:Id,text:string,sourceMessageIds:z.array(Id),provenance:record.optional()}).passthrough();
 const responses:Record<string,z.ZodType>={
   ok:z.object({ok:z.literal(true)}),health:z.object({ok:z.literal(true),sqlite:string}),
-  login:z.object({role:z.enum(['operator','viewer']),csrf:string}),created:z.object({id:Id}),versioned:z.object({id:Id,version:count}),
+  login:z.object({role:z.enum(['operator','viewer']),csrf:string}),created:z.object({id:Id}).passthrough(),versioned:z.object({id:Id,version:count}),
   session,sessions:z.array(session),message,messages:z.array(message),snapshot,page,thread:page.extend({rootId:Id}),
   character:CharacterSchema,characterRecord:z.object({character:CharacterSchema,hash:string}),
   characters:z.array(z.union([CharacterSchema,CharacterSchema.omit({persona:true})])),
