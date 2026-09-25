@@ -47,7 +47,7 @@ export function BudgetPanel({sessionId,api,refresh}:{sessionId:string;api:Api;re
       </fieldset>
       {report.autoResumeEligible&&<button type="button" disabled={busy} onClick={()=>void command('pause')}>自動再開を止めて一時停止</button>}
       <p className="muted">呼出数・発言数・稼働時間の上限は既存の実行設定と併用します。認証scopeは同一の固定期間（UTC基準）を全セッションで共有します。設定変更は消費済み量を消しません。</p>
-      <div style={{overflowX:'auto'}}><table><thead><tr><th>用途</th><th>呼出</th><th>実測入力</th><th>実測出力</th><th>usage不明</th><th>予約換算</th><th>応答平均</th></tr></thead><tbody>{report.calls.map(row=><tr key={row.kind+row.stage}><td>{row.kind}/{row.stage}</td><td>{row.calls}</td><td>{amount(row.reportedInput)}</td><td>{amount(row.reportedOutput)}</td><td>{Math.max(row.missingInput,row.missingOutput)}</td><td>{amount(row.chargedTokens)}</td><td>{row.finished?Math.round(row.durationMs/row.finished)+'ms':'不明'}</td></tr>)}</tbody></table></div>
+      <div style={{overflowX:'auto'}}><table><thead><tr><th>用途</th><th>呼出</th><th>実測入力</th><th>実測出力</th><th>usage不明</th><th>予約換算</th><th>応答平均</th></tr></thead><tbody>{report.calls.map(row=><tr key={row.kind+row.stage}><td>{row.kind}/{row.stage}</td><td>{row.calls}</td><td>{amount(row.reportedInput)}</td><td>{amount(row.reportedOutput)}</td><td>{row.missingUsage}</td><td>{amount(row.chargedTokens)}</td><td>{row.finished?Math.round(row.durationMs/row.finished)+'ms':'不明'}</td></tr>)}</tbody></table></div>
       <p>公開発言の実母数 {report.denominator} ／ 100発言換算の呼出数 {report.callsPer100Posts===null?'算出不可':report.callsPer100Posts.toFixed(1)}{!report.normalized?'（100件未満）':''} ／ 破棄候補 {report.candidates.discarded} ／ 原文検索 {report.recall.lookups}</p>
       <p>usage不明・応答不明は予約量を保持します。表示値は料金・サブスクリプション残量ではありません。金額上限はProvider側でも設定してください。</p>
     </>}

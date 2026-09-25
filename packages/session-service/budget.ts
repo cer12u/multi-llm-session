@@ -4,6 +4,7 @@ import {settingsOf,profileOf,type Store,type SessionRow,type RunRow,type AgentRo
 import {providerScope} from '../provider-state/index.js';
 
 export type BudgetWindow={id:string;session_id:string;started_at:number;ends_at:number|null;ended_at:number|null;reason:string;policy_json:string|null;call_start:number;post_start:number;call_boundary:number};
+export type UsageTotals={kind:string;stage:string;calls:number;reportedInput:number|null;reportedOutput:number|null;missingInput:number;missingOutput:number;missingUsage:number;estimatedInput:number;reservedOutput:number;chargedTokens:number;inflight:number;errors:number;durationMs:number;queueMs:number;finished:number};
 type ScopePolicy=Pick<OperationalBudget,'windowMs'|'scopeMaxCalls'|'scopeMaxTokens'>;
 // Legacy records have no reservation. Conservatively account their captured envelope rather than treating missing usage as zero.
 const estimatedInput="COALESCE(b.estimated_input,json_extract(r.context_json,'$.inputBudget.estimatedInputTokens'),json_extract(s.settings_json,'$.contextTokens'),65536)";
@@ -96,12 +97,15 @@ export class SessionBudget {
   }
   report(s:SessionRow){
     const w=this.current(s),now=this.now(),activeMs=s.active_elapsed_ms+(s.active_since===null?0:Math.max(0,now-s.active_since));
-    const calls=this.store.all<{kind:string;stage:string;calls:number;reportedInput:number|null;reportedOutput:number|null;missingInput:number;missingOutput:number;estimatedInput:number;reservedOutput:number;chargedTokens:number;inflight:number;errors:number;durationMs:number;queueMs:number;finished:number}>(
-      `SELECT r.kind,c.stage,COUNT(*) calls,SUM(c.input_tokens) reportedInput,SUM(c.output_tokens) reportedOutput,
-      SUM(c.input_tokens IS NULL) missingInput,SUM(c.output_tokens IS NULL) missingOutput,SUM(${estimatedInput}) estimatedInput,SUM(${estimatedOutput}) reservedOutput,
-      SUM(${charge}) chargedTokens,SUM(c.status IN ('RESERVED','ABANDONED') AND c.expires_at>?) inflight,SUM(c.error_code IS NOT NULL) errors,
+    const fields=`r.kind,c.stage,COUNT(*) calls,SUM(c.input_tokens) reportedInput,SUM(c.output_tokens) reportedOutput,
+      SUM(c.input_tokens IS NULL) missingInput,SUM(c.output_tokens IS NULL) missingOutput,
+      SUM(c.input_tokens IS NULL OR c.output_tokens IS NULL) missingUsage,
+      SUM(${estimatedInput}) estimatedInput,SUM(${estimatedOutput}) reservedOutput,SUM(${charge}) chargedTokens,
+      SUM(c.status IN ('RESERVED','ABANDONED') AND c.expires_at>?) inflight,SUM(c.error_code IS NOT NULL) errors,
       COALESCE(SUM(CASE WHEN c.finished_at IS NOT NULL THEN MAX(0,c.finished_at-c.started_at) ELSE 0 END),0) durationMs,
-      COALESCE(SUM(MAX(0,c.started_at-r.created_at)),0) queueMs,COUNT(c.finished_at) finished FROM ${joined} WHERE r.session_id=? GROUP BY r.kind,c.stage ORDER BY r.kind,c.stage`,now,s.id);
+      COALESCE(SUM(MAX(0,c.started_at-r.created_at)),0) queueMs,COUNT(c.finished_at) finished`;
+    const calls=this.store.all<UsageTotals>(`SELECT ${fields} FROM ${joined} WHERE r.session_id=? GROUP BY r.kind,c.stage ORDER BY r.kind,c.stage`,now,s.id);
+    const byAgent=this.store.all<UsageTotals&{agentId:string}>(`SELECT r.agent_id agentId,${fields} FROM ${joined} WHERE r.session_id=? GROUP BY r.agent_id,r.kind,c.stage ORDER BY r.agent_id,r.kind,c.stage`,now,s.id);
     const scopes=[...new Set(this.store.all<AgentRow>('SELECT * FROM agent_instances WHERE session_id=? AND retired_at IS NULL',s.id).map(a=>providerScope(profileOf(a))))].map(scope=>{
       const policy=this.scopePolicy(scope);return {scope,policy:policy??null,periodStart:policy?Math.floor(now/policy.windowMs)*policy.windowMs:null,...policy?this.scopeUsage(scope,policy):{calls:null,tokens:null}};
     });
@@ -110,7 +114,7 @@ export class SessionBudget {
     return {sessionId:s.id,epoch:s.epoch,policy:this.policy(s)??null,window:w?{id:w.id,startedAt:w.started_at,endsAt:w.ends_at,...this.windowUsage(s)}:null,
       lifecycle:s.lifecycle,stopReason:s.stop_reason,autoResumeEligible:s.lifecycle==='PAUSED'&&s.activity==='BUDGET_PAUSED'&&s.stop_reason!=='USER_PAUSED'&&!!this.policy(s)?.autoRenew,
       activeMs,wallMs:s.started_at===null?0:Math.max(0,now-s.started_at),windowWallMs:w?Math.max(0,now-w.started_at):0,
-      calls,scopes,recall:recalls,candidates:candidateTotals,publicPosts:s.bot_count,
+      calls,byAgent,scopes,recall:recalls,candidates:candidateTotals,publicPosts:s.bot_count,
       callsPer100Posts:s.bot_count?100*calls.reduce((n,c)=>n+c.calls,0)/s.bot_count:null,
       denominator:s.bot_count,normalized:s.bot_count>=100,billableCost:null,
       tokenAccounting:'Reported input/output, request estimates, and conservative reservation charges are separate. Unknown delivery/usage retains the reserved envelope. Provider-added tokens or inaccurate reporting can exceed the estimate; configure Provider-side spending limits for a billing guarantee.'};
