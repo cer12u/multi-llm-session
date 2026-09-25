@@ -1,3 +1,5 @@
+import {registerObservabilityRoutes} from './observability-routes.js';
+import {publicTranscript} from '../../packages/observability/index.js';
 import { registerSourceRoutes } from './source-routes.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -130,8 +132,9 @@ export function buildServer(service:SessionService,options:{webRoot?:string;time
     principal(req,false,true);const p=z.object({id:Id,operation:z.enum(['message','lifecycle','edit','settings','membership','participants','clone']),key:z.string().max(128)}).parse(req.params);
     return service.commandReceipt(p.id,p.operation,p.key);
   });
+  registerObservabilityRoutes(app,service,(req,operator)=>{principal(req,false,operator);});
   app.get('/v1/sessions/:id/diagnostics',async req=>{principal(req,false,true);return service.diagnostics(sessionId(req));});
-  app.get('/v1/sessions/:id/export',async(req,reply)=>{principal(req,false,true);const id=sessionId(req);reply.header('content-disposition',`attachment; filename="session-${id}.json"`);return service.exportSession(id);});
+  app.get('/v1/sessions/:id/export',async(req,reply)=>{principal(req,false,true);const id=sessionId(req);reply.header('content-disposition',`attachment; filename="session-${id}.json"`);return publicTranscript(service,id);});
   app.get('/v1/sessions/:id/events',async(req,reply)=>{
     const p=principal(req),id=sessionId(req);const loginId=header(req,'authorization').startsWith('Bearer ')?'':cookieId(req);const authorized=()=>p.expires>service.now()&&(!loginId||logins.get(loginId)===p);
     const query=z.object({cursor:z.string().max(100).optional()}).parse(req.query);

@@ -1,3 +1,4 @@
+import {CURRENT_SCHEMA_VERSION} from '../packages/storage-sqlite/schema-version.js';
 import {expect,it} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {mkdtempSync,rmSync} from 'node:fs';
@@ -29,7 +30,7 @@ it('R10-SOURCE-001: populated V7 upgrade preserves original IDs, time-based evid
     f.store.run('UPDATE agent_private_states SET entries_json=?,version=1 WHERE agent_id=?',JSON.stringify([entry]),owner);
     const before=Object.fromEntries(['messages','agent_instances','agent_private_states','agent_input_log','agent_input_cursors','agent_input_receipts','command_receipts'].map(table=>[table,f.store.all('SELECT * FROM '+table+' ORDER BY rowid')]));
     const old=f.store.get<{fetched_at:number;text:string;published_at:string}>('SELECT fetched_at,text,published_at FROM source_items WHERE id=?',id)!;
-    f.close();reopened=new Store(path);expect(inspectDatabase(path).schemaVersion).toBe(8);
+    f.close();reopened=new Store(path);expect(inspectDatabase(path).schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     for(const [table,rows] of Object.entries(before))expect(reopened.all('SELECT * FROM '+table+' ORDER BY rowid'),table).toEqual(rows);
     expect(reopened.get('SELECT version,text,published_at,fetched_at,audience_json,enabled FROM source_items WHERE id=?',id)).toEqual({...old,version:old.fetched_at,audience_json:'null',enabled:1});
     expect(reopened.get('SELECT source_id,version,text FROM source_versions WHERE source_id=?',id)).toEqual({source_id:id,version:old.fetched_at,text:old.text});
@@ -90,7 +91,7 @@ it('R10-SOURCE-004: V8 online backup and restore preserve all revisions, private
     const tables=['source_items','source_versions','source_feeds','source_feed_versions','source_feed_jobs','agent_private_states','agent_state_updates','agent_agenda','agent_input_log','agent_input_receipts'];
     const before=Object.fromEntries(tables.map(table=>[table,f.store.all('SELECT * FROM '+table+' ORDER BY rowid')]));
     const backup=join(dir,'backup.sqlite'),restored=join(dir,'restore.sqlite');
-    expect((await backupDatabase(path,backup)).schemaVersion).toBe(8);await restoreDatabase(backup,restored);
+    expect((await backupDatabase(path,backup)).schemaVersion).toBe(CURRENT_SCHEMA_VERSION);await restoreDatabase(backup,restored);
     db=new Store(restored);const service=new SessionService(db,{...f.config,dbPath:restored},f.now,()=>0);service.recover();
     for(const table of tables)expect(db.all('SELECT * FROM '+table+' ORDER BY rowid'),table).toEqual(before[table]);
     expect(service.sources.get(f.id,id,1).text).toBe('legacy body');expect(service.sources.get(f.id,id,2).text).toBe('revised source body');

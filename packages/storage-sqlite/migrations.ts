@@ -1,3 +1,4 @@
+import {migrateDiagnostics} from './diagnostic-migration.js';
 import type Database from 'better-sqlite3';
 import { migrateMemory } from './memory-migration.js';
 import { migrateSessions } from './session-migration.js';
@@ -157,9 +158,10 @@ function migrateV5(db: Database.Database): void {
 
 export function migrate(db:Database.Database):void {
   const version=db.pragma('user_version',{simple:true}) as number;
-  if(version===8)return;
-  if(version>8)throw new Error('Unsupported migration source: '+version);
+  if(version===9)return;
+  if(version>9)throw new Error('Unsupported migration source: '+version);
   if(version<6){migrateV5(db);migrateMemory(db);}
   if(version<7)migrateSessions(db);
-  migrateSources(db);
+  if(version<8)migrateSources(db);
+  migrateDiagnostics(db);
 }

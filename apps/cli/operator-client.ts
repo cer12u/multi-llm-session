@@ -27,6 +27,9 @@ export async function operatorCommand(args:string[],env:NodeJS.ProcessEnv=proces
     case 'episodes':path=`/v1/sessions/${session()}/episodes`;break;
     case 'members-apply':path=`/v1/sessions/${session()}/membership`;method='POST';body=JSON.parse(readFileSync(arg,'utf8'));break;
     case 'clone':path=`/v1/sessions/${session()}/clone`;method='POST';body=JSON.parse(readFileSync(arg,'utf8'));break;
+    case 'transcript':path=`/v1/sessions/${session()}/transcript`;break;
+    case 'diagnostic-runs':path=`/v1/sessions/${session()}/diagnostic-runs`;break;
+    case 'diagnostic-run':path=`/v1/sessions/${session()}/diagnostic-runs/${encodeURIComponent(Id.parse(arg))}`;break;
     case 'export':path=`/v1/sessions/${session()}/export`;break;
     case 'start':case 'pause':case 'resume':case 'end':case 'budget':path=`/v1/sessions/${session()}/${action}`;method='POST';body={};break;
     case 'retry-agent':path=`/v1/sessions/${session()}/agents/${encodeURIComponent(Id.parse(arg))}/retry`;method='POST';body={};break;
@@ -37,7 +40,7 @@ export async function operatorCommand(args:string[],env:NodeJS.ProcessEnv=proces
     case 'say':path=`/v1/sessions/${session()}/messages`;method='POST';body={text:arg};break;
     case 'source':path=`/v1/sessions/${session()}/sources`;method='POST';body=JSON.parse(readFileSync(arg,'utf8'));break;
     case 'search':path=`/v1/sessions/${session()}/search?q=${encodeURIComponent(arg)}`;break;
-    default:throw new Error('Usage: source-configurations | sources/feeds SESSION | source-get/source-versions/feed-retry SESSION SOURCE_OR_FEED_UUID | source-update SESSION SOURCE_UUID FILE | feed-save SESSION FILE | list | create FILE | profiles | profile-versions PROFILE | profile-save FILE | members/episodes/operations/status/start/pause/resume/end/export/budget SESSION | members-apply/clone SESSION FILE | retry-agent SESSION AGENT | retry-provider PROFILE VERSION | say/search SESSION TEXT | source SESSION FILE');
+    default:throw new Error('Usage: transcript/diagnostic-runs SESSION | diagnostic-run SESSION RUN | source-configurations | sources/feeds SESSION | source-get/source-versions/feed-retry SESSION SOURCE_OR_FEED_UUID | source-update SESSION SOURCE_UUID FILE | feed-save SESSION FILE | list | create FILE | profiles | profile-versions PROFILE | profile-save FILE | members/episodes/operations/status/start/pause/resume/end/export/budget SESSION | members-apply/clone SESSION FILE | retry-agent SESSION AGENT | retry-provider PROFILE VERSION | say/search SESSION TEXT | source SESSION FILE');
   }
   const response=await fetcher(new URL(path,base),{method,redirect:'error',headers:{authorization:'Bearer '+token,'content-type':'application/json','idempotency-key':env.IDEMPOTENCY_KEY??randomUUID()},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});
   return {ok:response.ok,body:await response.text()};
