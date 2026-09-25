@@ -8,13 +8,15 @@ export const diagnosticTables = [
   'agent_agenda','agent_agenda_bindings','agent_agenda_clock','session_member_changes','session_episodes',
   'source_items','source_versions','source_feeds','source_feed_versions','source_feed_jobs','llm_calls',
 ] as const;
+export const budgetDiagnosticTables=['budget_windows','call_budgets'] as const;
 export type Projection = {table:string;columns:string[];keys:string[]};
 const quote=(name:string)=>'"'+name.replaceAll('"','""')+'"';
 const literal=(value:string)=>"'"+value.replaceAll("'","''")+"'";
 const excluded:Record<string,string[]>={runs:['token','lease_until'],llm_calls:['request_key']};
 
 export function diagnosticProjection(db:Database.Database):Projection[]{
-  return diagnosticTables.map(table=>{
+  const tables=[...diagnosticTables,...budgetDiagnosticTables.filter(t=>db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t))];
+  return tables.map(table=>{
     const info=db.prepare('PRAGMA table_info('+quote(table)+')').all() as {name:string;pk:number}[];
     if(!info.length)throw new Error('DIAGNOSTIC_SOURCE_TABLE_MISSING');
     const columns=info.map(c=>c.name).filter(c=>!excluded[table]?.includes(c));
@@ -59,6 +61,12 @@ export function migrateDiagnostics(db:Database.Database):void {
     for(const p of projection)db.exec(`INSERT INTO diagnostic_journal(session_id,table_name,key_json,kind,before_json,after_json)
       SELECT ${diagnosticScope(p,'x')},${literal(p.table)},${json(p.keys,'x')},'BASELINE',NULL,${json(p.columns,'x')}
       FROM ${quote(p.table)} x ORDER BY ${p.keys.map(k=>'x.'+quote(k)).join(',')};`);
+    installDiagnosticTriggers(db,projection);
+    db.pragma('user_version=9');
+  }).immediate();
+}
+
+export function installDiagnosticTriggers(db:Database.Database,projection:Projection[]):void {
     for(const p of projection){
       const old=json(p.columns,'OLD'),next=json(p.columns,'NEW'),oldKey=json(p.keys,'OLD'),nextKey=json(p.keys,'NEW');
       const oldSession=diagnosticScope(p,'OLD'),nextSession=diagnosticScope(p,'NEW');
@@ -74,13 +82,11 @@ export function migrateDiagnostics(db:Database.Database):void {
           ${insert} VALUES(${nextSession},${literal(p.table)},${nextKey},CASE WHEN ${same} THEN 'UPDATE' ELSE 'INSERT' END,
             CASE WHEN ${same} THEN ${delta(p,'OLD')} ELSE NULL END,CASE WHEN ${same} THEN ${delta(p,'NEW')} ELSE ${next} END); END;`);
     }
-    db.pragma('user_version=9');
-  }).immediate();
 }
 
 export function checkDiagnosticStructure(db:Database.Database):void {
   const objects=new Set((db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index','trigger')").all() as {name:string}[]).map(o=>o.name));
-  const required=['diagnostic_projection','diagnostic_journal','diagnostic_session_seq',...diagnosticTables.flatMap(t=>['i','u','d'].map(s=>'diagnostic_'+t+'_'+s))];
+  const required=['diagnostic_projection','diagnostic_journal','diagnostic_session_seq',...diagnosticProjection(db).map(p=>p.table).flatMap(t=>['i','u','d'].map(s=>'diagnostic_'+t+'_'+s))];
   if(required.some(n=>!objects.has(n)))throw new Error('STORAGE_SCHEMA_INCOMPLETE');
   const row=db.prepare('SELECT definition_json FROM diagnostic_projection WHERE version=1').get() as {definition_json:string}|undefined;
   if(!row||row.definition_json!==JSON.stringify(diagnosticProjection(db)))throw new Error('STORAGE_DIAGNOSTIC_SCHEMA_MISMATCH');

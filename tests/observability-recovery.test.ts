@@ -18,7 +18,7 @@ it('R10-DIAG-006: populated V8 migration is a truthful baseline, preserving owne
   const dir=mkdtempSync(join(tmpdir(),'diagnostic-migration-')),path=join(dir,'live.sqlite'),f=fixture(3,{selfWakeEnabled:false},path);let db:Store|undefined;
   try{
     const original=f.say('retained V8 original');f.service.injectSource(f.id,{title:'PRIVATE_V8_SOURCE',text:'private retained material',audience:[f.service.agents(f.id)[0].id]},randomUUID());
-    f.start();const run=f.claim()!;asV8Fixture(f.store.db);const expected=diagnosticSnapshot(f.store,f.id);f.close();
+    f.start();const run=f.claim()!;asV8Fixture(f.store.db);const expected=[...diagnosticSnapshot(f.store,f.id),{table:'budget_windows',rows:[]},{table:'call_budgets',rows:[]}];f.close();
     db=new Store(path);checkDiagnosticStructure(db.db);
     expect(diagnosticSnapshot(db,f.id)).toEqual(expected);
     expect(db.all<{kind:string}>('SELECT kind FROM diagnostic_journal').every(row=>row.kind==='BASELINE')).toBe(true);
@@ -49,7 +49,7 @@ it('R10-DIAG-008: exact online backup/restore includes committed journal and res
   try{
     f.say('source');f.start();const run=f.claim()!;f.finish(run,{decision:'ABSTAIN',reason:'quiet'});f.service.lifecycle(f.id,'pause',randomUUID());
     const before=diagnosticSnapshot(f.store,f.id),journal=f.store.all('SELECT * FROM diagnostic_journal ORDER BY seq');
-    const backup=join(dir,'backup.sqlite'),restored=join(dir,'restored.sqlite');expect((await backupDatabase(path,backup)).schemaVersion).toBe(9);
+    const backup=join(dir,'backup.sqlite'),restored=join(dir,'restored.sqlite');expect((await backupDatabase(path,backup)).schemaVersion).toBe(10);
     await restoreDatabase(backup,restored);db=new Store(restored);
     expect(diagnosticSnapshot(db,f.id)).toEqual(before);expect(db.all('SELECT * FROM diagnostic_journal ORDER BY seq')).toEqual(journal);
     const service=new SessionService(db,{...f.config,dbPath:restored},f.now,()=>0);service.recover();

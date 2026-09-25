@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import type {PublicMessage} from '../contracts/index.js';
 import { canonical,hash } from '../domain/index.js';
-import { diagnosticTables,type Projection } from '../storage-sqlite/diagnostic-migration.js';
+import { diagnosticTables,budgetDiagnosticTables,type Projection } from '../storage-sqlite/diagnostic-migration.js';
 
 export const MAX_DIAGNOSTIC_BYTES=128*1024*1024;
 export const MAX_DIAGNOSTIC_ROWS=200000;
 export type Row=Record<string,string|number|null>;
-export type Header={type:'manifest';kind:'private-session-diagnostic';formatVersion:1;databaseSchema:9;
+export type Header={type:'manifest';kind:'private-session-diagnostic';formatVersion:1;databaseSchema:9|10;
   sessionId:string;high:number;records:number;baselineRecords:number;stateRows:number;stateHash:string;projection:Projection[];
   manifest:Record<string,unknown>};
 export type Frame={type:'change';seq:number;sessionId:string;table:string;key:Row;kind:'BASELINE'|'INSERT'|'UPDATE'|'DELETE';before:Row|null;after:Row|null};
@@ -33,18 +33,19 @@ export class Replay {
   private started=false;
   private rowCount=0;
   constructor(input:unknown){
-    requireValue(object(input)&&input.type==='manifest'&&input.kind==='private-session-diagnostic'&&input.formatVersion===1&&input.databaseSchema===9,'REPLAY_MANIFEST_UNSUPPORTED');
+    requireValue(object(input)&&input.type==='manifest'&&input.kind==='private-session-diagnostic'&&input.formatVersion===1&&(input.databaseSchema===9||input.databaseSchema===10),'REPLAY_MANIFEST_UNSUPPORTED');
     requireValue(typeof input.sessionId==='string'&&/^[0-9a-f-]{36}$/i.test(input.sessionId)&&integer(input.high)&&integer(input.records)&&integer(input.baselineRecords)&&integer(input.stateRows)&&input.stateRows<=MAX_DIAGNOSTIC_ROWS,'REPLAY_MANIFEST_INVALID');
     requireValue(typeof input.stateHash==='string'&&/^[a-f0-9]{64}$/.test(input.stateHash)&&object(input.manifest),'REPLAY_MANIFEST_INVALID');
-    requireValue(Array.isArray(input.projection)&&input.projection.length===diagnosticTables.length,'REPLAY_PROJECTION_INVALID');
+    const expectedTables=input.databaseSchema===10?[...diagnosticTables,...budgetDiagnosticTables]:diagnosticTables;
+    requireValue(Array.isArray(input.projection)&&input.projection.length===expectedTables.length,'REPLAY_PROJECTION_INVALID');
     for(const candidate of input.projection){
-      requireValue(object(candidate)&&typeof candidate.table==='string'&&(diagnosticTables as readonly string[]).includes(candidate.table)&&!this.tables.has(candidate.table),'REPLAY_PROJECTION_INVALID');
+      requireValue(object(candidate)&&typeof candidate.table==='string'&&(expectedTables as readonly string[]).includes(candidate.table)&&!this.tables.has(candidate.table),'REPLAY_PROJECTION_INVALID');
       requireValue(Array.isArray(candidate.columns)&&candidate.columns.length>0&&candidate.columns.length<=100&&candidate.columns.every(validName)&&new Set(candidate.columns).size===candidate.columns.length,'REPLAY_PROJECTION_INVALID');
       requireValue(Array.isArray(candidate.keys)&&candidate.keys.length>0&&candidate.keys.length<=8&&candidate.keys.every(k=>(candidate.columns as string[]).includes(k))&&new Set(candidate.keys).size===candidate.keys.length,'REPLAY_PROJECTION_INVALID');
       requireValue(candidate.table!=='runs'||!candidate.columns.includes('token'),'REPLAY_CAPABILITY_FORBIDDEN');
       const projection=candidate as unknown as Projection;this.tables.set(projection.table,{projection,rows:new Map()});
     }
-    requireValue([...this.tables.keys()].every((name,i)=>name===diagnosticTables[i]),'REPLAY_PROJECTION_ORDER');
+    requireValue([...this.tables.keys()].every((name,i)=>name===expectedTables[i]),'REPLAY_PROJECTION_ORDER');
     this.header=input as unknown as Header;
   }
   apply(input:unknown):void {

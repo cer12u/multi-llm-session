@@ -5,6 +5,12 @@ import { operations, profileCatalog, profileVersions } from '../../packages/sess
 import type { SessionService } from '../../packages/session-service/index.js';
 
 export function registerOperationsRoutes(app:FastifyInstance,service:SessionService,authorize:(req:FastifyRequest,write?:boolean)=>void):void{
+  app.get('/v1/sessions/:id/usage',async req=>{authorize(req);const {id}=z.object({id:Id}).parse(req.params);return service.budgetReport(id);});
+  app.post('/v1/sessions/:id/budget-policy',async req=>{
+    authorize(req,true);const {id}=z.object({id:Id}).parse(req.params);
+    const key=req.headers['idempotency-key'];ensure(typeof key==='string',422,'IDEMPOTENCY_KEY_REQUIRED');
+    return service.updateBudgetPolicy(id,req.body,key);
+  });
   app.get('/v1/provider-catalog',async req=>{authorize(req);return profileCatalog(service);});
   app.get('/v1/model-profiles/:profile/versions',async req=>{
     authorize(req);const {profile}=z.object({profile:Slug}).parse(req.params);

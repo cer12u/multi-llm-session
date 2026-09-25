@@ -1,3 +1,5 @@
+import {SessionBudget} from './budget.js';
+import {BudgetPolicyUpdateSchema} from '../contracts/budget.js';
 import { randomUUID } from 'node:crypto';
 import { SessionSources } from './sources.js';
 import { currentSources, lookupSource } from './source-access.js';
@@ -31,6 +33,7 @@ const activeCandidateSQL = "SELECT * FROM candidates WHERE agent_id=? AND state 
 
 /** Only this service writes conversation state. No asynchronous work occurs inside its transactions. */
 export class SessionService {
+  readonly budgets:SessionBudget;
   readonly changes = new EventEmitter();
   readonly sources: SessionSources;
   readonly pages: ArchivePages;
@@ -41,6 +44,7 @@ export class SessionService {
   private readonly memoryLedger: MemoryLedger;
   constructor(readonly store: Store, readonly config: Config, readonly now: () => number = Date.now,
     readonly random: () => number = Math.random) {
+    this.budgets=new SessionBudget(store,now);
     this.pages = new ArchivePages(store, row => this.publicMessage(row));
     this.providers = new ProviderState(store, now);
     this.privateStates = new PrivateStates(store, now);
@@ -150,9 +154,34 @@ export class SessionService {
     return this.receipt(`operator:${id}:budget`,key,{},()=>{
       const s=this.session(id); ensure(s.lifecycle==='DRAFT'||s.lifecycle==='PAUSED',409,'PAUSE_REQUIRED');
       this.stopClock(id);
+      this.budgets.open(s,'MANUAL_RENEWAL',true);
       this.store.run("UPDATE sessions SET active_elapsed_ms=0,window_call_start=call_count,window_post_start=bot_count,stop_reason=NULL,activity='QUIET',epoch=epoch+1 WHERE id=?",id);
       this.cancelRuns(id,'BUDGET_RENEWED'); this.emit(id,'budget.renewed',{}); return this.publicSession(this.session(id));
     });
+  }
+  updateBudgetPolicy(id:string,input:unknown,key:string) {
+    const data=BudgetPolicyUpdateSchema.parse(input);
+    return this.receipt(`operator:${id}:budget-policy`,key,data,()=>{
+      const s=this.session(id);ensure(s.lifecycle==='DRAFT'||s.lifecycle==='PAUSED',409,'PAUSE_REQUIRED');
+      ensure(s.epoch===data.expectedEpoch,409,'SESSION_EPOCH_CONFLICT');
+      const settings=settingsOf(s);if(data.policy)settings.operationalBudget=data.policy;else delete settings.operationalBudget;
+      this.store.run('UPDATE sessions SET settings_json=?,epoch=epoch+1 WHERE id=?',JSON.stringify(SettingsSchema.parse(settings)),id);
+      this.budgets.validate(this.session(id));this.budgets.changed(this.session(id));this.cancelRuns(id,'BUDGET_POLICY_CHANGED');
+      this.emit(id,'budget.policy',{});return this.budgets.report(this.session(id));
+    });
+  }
+  budgetReport(id:string) {return this.store.tx(()=>({...this.budgets.report(this.session(id)),runtime:{
+    cpu:process.cpuUsage(),memory:process.memoryUsage(),databaseBytes:Number(this.store.db.pragma('page_count',{simple:true}))*Number(this.store.db.pragma('page_size',{simple:true})),
+    agents:this.agents(id).map(a=>({id:a.id,input:this.inputs.progress(a.id,id)}))}}));}
+  private renewAutomatic(s:SessionRow):void {
+    if(!this.budgets.canAutoRenew(s))return;
+    if(s.lifecycle==='PAUSED'&&this.store.get<{n:number}>("SELECT COUNT(*) n FROM sessions WHERE lifecycle='RUNNING' AND id<>?",s.id)!.n>=this.config.maxRunning)return;
+    this.stopClock(s.id);this.budgets.open(s,'AUTOMATIC_RENEWAL',true);
+    this.cancelRuns(s.id,'BUDGET_WINDOW_RENEWED');
+    this.store.run("UPDATE sessions SET lifecycle='RUNNING',activity='ACTIVE',stop_reason=NULL,active_elapsed_ms=0,active_since=?,window_call_start=call_count,window_post_start=bot_count,epoch=epoch+1 WHERE id=?",this.now(),s.id);
+    this.store.run("UPDATE candidates SET state='NEEDS_REVIEW' WHERE session_id=? AND state='READY'",s.id);
+    for(const a of this.agents(s.id))if(a.enabled)this.wake(a.id,'BUDGET_RENEWED');
+    this.emit(s.id,'budget.renewed',{automatic:true});
   }
   private selfWake(settings: ReturnType<typeof settingsOf>): number {
     return this.now()+settings.selfWakeMinMs+Math.floor(this.random()*(settings.selfWakeMaxMs-settings.selfWakeMinMs));
@@ -173,6 +202,7 @@ export class SessionService {
         this.store.run('INSERT INTO agent_instances(id,session_id,slot,character_json,profile_json,next_self_at) VALUES(?,?,?,?,?,?)',
           randomUUID(),id,p.slot,JSON.stringify(definitions.find(c=>c.id===p.characterId)),JSON.stringify(this.modelProfiles().find(m=>m.id===p.profileId)),this.selfWake(data.settings));
       }
+      this.budgets.validate(this.session(id));
       this.emit(id,'session.created',{}); return {id};
     });
   }
@@ -198,9 +228,11 @@ export class SessionService {
     this.session(id);
     return this.receipt(`operator:${id}:lifecycle`,key,{action},()=>{
       const s=this.session(id);
-      const allowed={start:['DRAFT'],pause:['RUNNING'],resume:['PAUSED'],end:['DRAFT','RUNNING','PAUSED']};
+      const allowed={start:['DRAFT'],pause:['RUNNING','PAUSED'],resume:['PAUSED'],end:['DRAFT','RUNNING','PAUSED']};
       ensure(allowed[action].includes(s.lifecycle),409,'INVALID_LIFECYCLE');
       if(action==='start'||action==='resume') {
+        this.budgets.validate(s);this.budgets.open(s);
+        ensure(!this.budgets.elapsedReason(s)&&!this.budgets.exceeded(s),409,'LIMIT_ALREADY_REACHED');
         const st=settingsOf(s);
         ensure(s.call_count-s.window_call_start<st.maxCalls&&s.bot_count-s.window_post_start<st.maxMessages&&!this.timeExceeded(s),409,'LIMIT_ALREADY_REACHED');
         const count=this.store.get<{n:number}>("SELECT COUNT(*) n FROM sessions WHERE lifecycle='RUNNING' AND id<>?",id)!.n;
@@ -226,6 +258,7 @@ export class SessionService {
     return this.receipt(`operator:${id}:settings`,key,settings,()=>{
       const s=this.session(id); ensure(s.lifecycle==='DRAFT'||s.lifecycle==='PAUSED',409,'PAUSE_REQUIRED');
       this.store.run('UPDATE sessions SET settings_json=?,epoch=epoch+1 WHERE id=?',JSON.stringify(settings),id);
+      this.budgets.validate(this.session(id));this.budgets.changed(this.session(id));
       this.cancelRuns(id,'SETTINGS_CHANGED'); this.emit(id,'session.settings',{}); return this.publicSession(this.session(id));
     });
   }
@@ -238,6 +271,7 @@ export class SessionService {
       this.store.run('UPDATE sessions SET epoch=epoch+1 WHERE id=?',session);
       this.store.run('UPDATE agent_instances SET enabled=?,state=? WHERE id=?',enabled?1:0,enabled?'listening':'disabled',agentId);
       this.store.run("UPDATE candidates SET state='DROPPED',reason='MEMBERSHIP_CHANGED' WHERE agent_id=? AND state IN ('DRAFTING','READY','NEEDS_REVIEW','DEFERRED')",agentId);
+      this.budgets.validate(this.session(session));
       this.emit(session,'session.membership',{agentId,enabled}); return {ok:true};
     });
   }
@@ -247,6 +281,7 @@ export class SessionService {
     const data=MembershipUpdateSchema.parse(input);
     return this.receipt(`operator:${id}:participants`,key,data,()=>{
       const changes=applyMembership(this,id,data,settings=>this.selfWake(settings));
+      this.budgets.validate(this.session(id));
       if(changes.changed) {
         this.cancelRuns(id,'MEMBERSHIP_RECONCILED');
         this.store.run("UPDATE candidates SET state='DROPPED',reason='MEMBERSHIP_RECONCILED' WHERE session_id=? AND state IN ('DRAFTING','READY','NEEDS_REVIEW','DEFERRED')",id);
@@ -315,7 +350,7 @@ export class SessionService {
     const sequence=this.store.get<{message_seq:number}>('SELECT message_seq FROM sessions WHERE id=?',session)!.message_seq+1;
     const threadRoot=intent.replyTo?this.store.get<MessageRow>('SELECT * FROM messages WHERE id=?',intent.replyTo)!.thread_root:id;
     this.store.run('UPDATE sessions SET message_seq=? WHERE id=?',sequence,session);
-    this.store.run('UPDATE sessions SET revision=?,last_activity_at=?,last_post_at=?,episode=?,activity=? WHERE id=?',revision,now,now,episode,'ACTIVE',session);
+    this.store.run('UPDATE sessions SET revision=?,last_activity_at=?,last_post_at=?,episode=?,activity=? WHERE id=?',revision,now,now,episode,s.lifecycle==='PAUSED'&&s.activity==='BUDGET_PAUSED'?'BUDGET_PAUSED':'ACTIVE',session);
     this.store.run('INSERT INTO messages(id,session_id,revision,author_id,text,act,reply_to,addressed_json,candidate_id,episode,created_at,sequence,thread_root) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
       id,session,revision,author,text,intent.act,intent.replyTo,JSON.stringify(intent.addressedTo),candidateId,episode,now,sequence,threadRoot);
     this.store.run('INSERT INTO messages_fts(message_id,session_id,text) VALUES(?,?,?)',id,session,text);
@@ -469,9 +504,11 @@ export class SessionService {
       ensure(previous.length<4,409,'CALL_ATTEMPT_LIMIT');
       ensure(stage==='primary'?previous.length===0:stage==='repair'?!previous.some(c=>c.stage==='repair')&&previous.some(c=>c.status==='FINISHED'&&!c.error_code):r.retrieval_count>previous.filter(c=>c.stage==='lookup').length&&r.retrieval_count<=2,409,'INVALID_CALL_STAGE');
       ensure(!previous.some(c=>['RESERVED','ABANDONED'].includes(c.status)&&c.expires_at>this.now()),429,'RUN_BUSY');
-      const scope=providerScope(p),callId=randomUUID();
+      const scope=providerScope(p),callId=randomUUID(),reservation=this.budgets.reservation(s,r,scope);
+      if(reservation.blocked){this.pauseForLimit(s.id,reservation.blocked);return {blocked:true};}
       this.providers.reserve(p,callId,this.now()+st.requestTimeoutMs+10000,Math.min(p.maxConcurrent,this.config.maxConcurrentProvider));
       this.store.run('INSERT INTO llm_calls(id,run_id,request_key,scope,stage,status,started_at,expires_at,context_hash) VALUES(?,?,?,?,?,?,?,?,?)',callId,id,requestKey,scope,stage,'RESERVED',this.now(),this.now()+st.requestTimeoutMs+10000,hash(r.context_json));
+      this.budgets.record(callId,s,scope,reservation);
       this.store.run('UPDATE sessions SET call_count=call_count+1 WHERE id=?',s.id);
       this.trace(s.id,r.agent_id,r.id,'CALL_RESERVED',{kind:r.kind,stage,provider:p.provider}); return {id:callId};
     });
@@ -484,8 +521,11 @@ export class SessionService {
       if(c.result_hash) { ensure(c.result_hash===digest,409,'IDEMPOTENCY_CONFLICT'); return {ok:true}; }
       this.store.run('UPDATE llm_calls SET status=?,finished_at=?,input_tokens=?,output_tokens=?,error_code=?,result_hash=? WHERE id=?',
         error==='TIMEOUT'||error==='CANCELLED'||error==='DELIVERY_UNKNOWN'?'ABANDONED':'FINISHED',this.now(),usage.inputTokens,usage.outputTokens,error,digest,callId);
+      this.budgets.settle(callId,usage,error==='TIMEOUT'||error==='CANCELLED'||error==='DELIVERY_UNKNOWN');
+      const session=this.session(r.session_id),over=this.budgets.exceeded(session);
+      if(session.lifecycle==='RUNNING'&&over)this.pauseForLimit(session.id,over);
       // Meter late replies, but a fenced request cannot mutate the new circuit generation.
-      if(r.state==='ACTIVE') this.providers.finish(profileOf(this.agent(r.agent_id)),callId,error,retryAfterMs);
+      if(this.store.get<RunRow>('SELECT * FROM runs WHERE id=?',r.id)?.state==='ACTIVE') this.providers.finish(profileOf(this.agent(r.agent_id)),callId,error,retryAfterMs);
       return {ok:true};
     });
   }
@@ -620,7 +660,8 @@ export class SessionService {
   }
   private commitOne(id: string): PublicMessage|null {
     let s=this.session(id); if(s.lifecycle!=='RUNNING') return null;
-    const st=settingsOf(s);
+    const st=settingsOf(s),budgetReason=this.budgets.elapsedReason(s)??this.budgets.exceeded(s);
+    if(budgetReason){this.pauseForLimit(id,budgetReason);return null;}
     if(this.timeExceeded(s)) { this.pauseForLimit(id,'MAX_DURATION'); return null; }
     if(s.bot_count-s.window_post_start>=st.maxMessages) { this.pauseForLimit(id,'MAX_MESSAGES'); return null; }
     if(this.now()<s.last_post_at+st.postGapMs) return null;
@@ -655,7 +696,10 @@ export class SessionService {
         if(this.session(run.session_id).lifecycle==='RUNNING') this.wake(run.agent_id,'RECOVERY');
         this.trace(run.session_id,run.agent_id,run.id,'LEASE_EXPIRED');
       }
+      for(const s of this.store.all<SessionRow>("SELECT * FROM sessions WHERE lifecycle='RUNNING' OR (lifecycle='PAUSED' AND activity='BUDGET_PAUSED')"))this.renewAutomatic(s);
       for(let s of this.store.all<SessionRow>("SELECT * FROM sessions WHERE lifecycle='RUNNING'")) {
+        const budgetReason=this.budgets.elapsedReason(s)??this.budgets.exceeded(s);
+        if(budgetReason){this.pauseForLimit(s.id,budgetReason);continue;}
         if(this.timeExceeded(s)) { this.pauseForLimit(s.id,'MAX_DURATION'); continue; }
         for(let a of this.agents(s.id)) {
           if(!a.enabled) continue;
