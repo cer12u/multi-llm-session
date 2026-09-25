@@ -1,4 +1,4 @@
-import {readFileSync,writeFileSync,mkdirSync,realpathSync,statSync,readdirSync,readlinkSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdirSync,realpathSync,statSync,readdirSync,readlinkSync,existsSync} from 'node:fs';
 import {dirname,resolve,relative,join,sep} from 'node:path';
 import {createServer} from 'node:net';
 import {randomUUID} from 'node:crypto';
@@ -56,11 +56,12 @@ async function main(){
     const last=await api(`/v1/sessions/${id}/snapshot`);if(last.session.lifecycle!=='ENDED')await api(`/v1/sessions/${id}/end`,{});
     const usage=await api(`/v1/sessions/${id}/usage`),diagnostics=await api(`/v1/sessions/${id}/diagnostics`);
     await diagnosticCommand(['diagnostic-export',id!,join(target,'private-recording.ndjson')],{CORE_URL:current.base,ADMIN_TOKEN:current.token});
-    const result={...preflight.report,status:'EXECUTED',sessionId:id,elapsedMs:Date.now()-started,exitReason,usage,metrics:diagnostics.metrics,
+    const {networkCalls:preflightNetworkCalls,...checked}=preflight.report;
+    const result={...checked,preflightNetworkCalls,modelCalls:usage.calls.reduce((n:number,c:{calls:number})=>n+c.calls,0),status:'EXECUTED',sessionId:id,elapsedMs:Date.now()-started,exitReason,usage,metrics:diagnostics.metrics,
       semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,remoteInferenceCancellationGuaranteed:false,privateRecording:'private-recording.ndjson'};
     save(join(target,'result.json'),result);save(join(target,'resources.json'),samples);
     console.log(JSON.stringify({status:'EXECUTED',scenario:manifest.scenario,evidenceMode:manifest.evidenceMode,sessionId:id,calls:usage.calls.reduce((n:number,c:{calls:number})=>n+c.calls,0),posts:usage.publicPosts,exitReason,semanticAcceptance:'NOT_EVALUATED',privateFiles:true}));
-  }catch(error){save(join(target,'failure.json'),{status:'FAILED',sessionId:id??null,exitReason,code:error instanceof Error&&/^EXPERIMENT_[A-Z_]+$/.test(error.message)?error.message:'EXPERIMENT_FAILED',semanticAcceptance:'NOT_EVALUATED'});throw error;}
+  }catch(error){if(!existsSync(join(target,'resources.json')))save(join(target,'resources.json'),samples);save(join(target,'failure.json'),{status:'FAILED',sessionId:id??null,exitReason,code:error instanceof Error&&/^EXPERIMENT_[A-Z_]+$/.test(error.message)?error.message:'EXPERIMENT_FAILED',semanticAcceptance:'NOT_EVALUATED'});throw error;}
   finally{await cluster?.stop();process.off('SIGTERM',interrupt);process.off('SIGINT',interrupt);}
 }
 try{await main();}catch{console.error('EXPERIMENT_FAILED: inspect the private result and preflight; no credential values are printed.');process.exitCode=1;}
