@@ -17,12 +17,11 @@ const server=createServer(async(req,res)=>{
  try{
   const chunks=[];for await(const chunk of req)chunks.push(chunk);
   const body=JSON.parse(Buffer.concat(chunks)),c=JSON.parse(body.messages.find(m=>m.role==='user').content);
-  assert.equal(body.response_format.type,'json_schema');calls++;
-  const s=c.self.privateState;
-  const result={action:{decision:phase==='hold'?'SPEAK':'ABSTAIN',...(phase==='hold'?{intent:{act:'comment',intent:'obsolete proposal',replyTo:c.messages.at(-1).id,addressedTo:[]}}:{reason:'synthetic listen'})},
-   statePatch:{agentId:s.agentId,sessionId:s.sessionId,expectedVersion:s.version,observationId:c.observation.id,upsert:[{id:'long-e2e',kind:'interest',text:phase==='hold'?'MUST_NOT_SURVIVE_PAUSE':'retained after long HTTP wait',evidence:[],resume:null}],remove:[]}};
+  assert.equal(body.response_format.type,'json_schema');const wire=JSON.stringify(body);for(const forbidden of ['expectedVersion','observationId','sessionId','profileHash','privateState'])assert.equal(wire.includes(forbidden),false,'model wire contains internal binding '+forbidden);calls++;
+  const result={type:'result',action:{decision:phase==='hold'?'SPEAK':'ABSTAIN',...(phase==='hold'?{intent:{act:'comment',intent:'obsolete proposal',replyTo:c.messages.at(-1).ref,addressedTo:[]}}:{reason:'synthetic listen'})},
+   state:{upsert:[{id:'long-e2e',kind:'interest',text:phase==='hold'?'MUST_NOT_SURVIVE_PAUSE':'retained after long HTTP wait',evidence:[],resume:null}],remove:[]}};
   if(phase==='delayed'&&calls===1){firstAt=Date.now();await delay(310000);slowDelivered=true;}
-  if(phase==='hold'){held={owner:s.agentId,at:Date.now()};await new Promise(resolve=>{release=resolve;});}
+  if(phase==='hold'){held={owner:c.self.name,at:Date.now()};await new Promise(resolve=>{release=resolve;});}
   res.writeHead(200,{'content-type':'application/json','content-encoding':'gzip'});
   res.end(gzipSync(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify({result})}}],usage:{prompt_tokens:12,completion_tokens:8}})));
  }catch(error){if(!res.headersSent)res.writeHead(500);res.end();console.error('Synthetic provider failed:',error.message);}
