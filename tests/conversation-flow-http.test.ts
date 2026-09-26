@@ -4,6 +4,7 @@ import { fixture } from './helpers.js';
 import { buildServer } from '../apps/core/server.js';
 import { CoreClient, WorkerRuntime } from '../apps/agent-worker/runtime.js';
 import { modelRequest } from '../packages/models/index.js';
+import { projectModelContext } from '../packages/models/model-protocol.js';
 import type { Context } from '../packages/contracts/index.js';
 
 it('R6-FLOW-007: one topic starts three independent HTTP workers; purpose feedback permits quiet and source-driven reconsideration without a viewer', async () => {
@@ -17,7 +18,7 @@ it('R6-FLOW-007: one topic starts three independent HTTP workers; purpose feedba
       complete: async (kind, context) => {
         captured[index].push(structuredClone(context));
         const request = modelRequest(run.profile, kind, context, { maxChars: run.contextChars });
-        expect(JSON.parse((request.messages as { role: string; content: string }[]).find(m => m.role === 'user')!.content)).toEqual(context);
+        expect(JSON.parse((request.messages as { role: string; content: string }[]).find(m => m.role === 'user')!.content)).toEqual(projectModelContext(context).context);
         const purpose = 'synthetic-purpose-' + index + (context.sources.some(s => s.title === '第二の資料') ? '-source' : '-topic');
         let action: unknown, statePatch: unknown;
         if (kind === 'memory') action = { notes: [] };

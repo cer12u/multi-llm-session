@@ -6,7 +6,7 @@ import {join,resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {startCluster} from './cluster.js';
 import type {ContinuityFingerprint} from '../../packages/observability/continuity.js';
-import type {Context,Intent,Snapshot,PublicMessage,Page} from '../../packages/contracts/index.js';
+import type {Snapshot,PublicMessage,Page} from '../../packages/contracts/index.js';
 import type {SessionService} from '../../packages/session-service/index.js';
 
 type Usage=ReturnType<SessionService['budgetReport']>;
@@ -20,23 +20,23 @@ let injected=false,faults=0,requests=0,providerFailure:string|null=null;
 const ownerRequests=new Map<string,number>();
 const provider=createServer((req,res)=>{void (async()=>{
   const chunks:Buffer[]=[];let bytes=0;for await(const chunk of req){const b=Buffer.from(chunk);bytes+=b.length;assert(bytes<=1048576,'SOAK_REQUEST_TOO_LARGE');chunks.push(b);}
-  const request=JSON.parse(Buffer.concat(chunks).toString()),system=String(request.messages[0].content),context:Context=JSON.parse(request.messages.find((m:{role:string})=>m.role==='user').content);
+  const request=JSON.parse(Buffer.concat(chunks).toString()),system=String(request.messages[0].content),context=JSON.parse(request.messages.find((m:{role:string})=>m.role==='user').content);
   const index=Number(String(request.model).split('-').at(-1));assert(index>=0&&index<3,'SOAK_MODEL_ID');
   assert.equal(req.headers.authorization,'Bearer synthetic-soak-key-'+index,'SOAK_CREDENTIAL_ROUTING');
-  requests++;assert(requests<=limits.maxRequests,'SOAK_REQUEST_CAP');ownerRequests.set(context.self.id,(ownerRequests.get(context.self.id)??0)+1);
+  requests++;assert(requests<=limits.maxRequests,'SOAK_REQUEST_CAP');ownerRequests.set(context.self.name,(ownerRequests.get(context.self.name)??0)+1);
   await sleep(index===2?100:20);
   if(injected&&index===2){injected=false;faults++;res.writeHead(429,{'retry-after':'1'});res.end('synthetic failure');return;}
-  const original=context.messages.find(m=>m.authorId===null&&!m.deleted),state=context.self.privateState!;
+  const original=context.messages.find((m:any)=>m.from==='human'&&!m.deleted),state=context.self.state;
   let action:unknown;
-  if(system.includes('Process exactly the supplied unprocessed delivery window'))action={notes:original?[{text:'Synthetic retained original '+original.sequence,sourceMessageIds:[original.id]}]:[]};
-  else if(system.includes('Write only your own proposed utterance'))action={decision:'DRAFT',text:context.candidate?.intent.intent??'Synthetic contribution'};
-  else if(system.includes('Read the new context and delta'))action=context.coverage?.complete?{decision:'KEEP'}:{decision:'REWRITE',text:context.candidate!.text,intent:context.candidate!.intent};
+  if(context.delivery?.purpose==='memory')action={type:'result',action:{notes:original?[{text:'Synthetic retained original',sources:[original.ref]}]:[]},state:null};
+  else if(system.includes('Write only your proposed utterance'))action={type:'result',action:{decision:'DRAFT',text:context.candidate?.intent.intent??'Synthetic contribution'},state:null};
+  else if(system.includes('Reconsider your private candidate'))action={type:'result',action:context.coverage?.complete?{decision:'KEEP'}:{decision:'REWRITE',text:context.candidate!.text,intent:context.candidate!.intent},state:null};
   else {
-    const topic=context.messages.filter(m=>m.authorId===null&&m.text.startsWith('SOAK_TOPIC_')).at(-1);
-    const previous=state.entries.find(e=>e.id==='soak-topic')?.text;
-    const speak=system.includes('Choose whether YOU want to speak now')&&topic&&previous!==topic.text;
-    const intent:Intent={act:'comment',intent:'Synthetic contribution to '+(topic?.text??'initial input'),replyTo:topic?.id??null,addressedTo:[]};
-    action={action:speak?{decision:'SPEAK',intent}:{decision:'ABSTAIN',reason:'synthetic owner chooses quiet'},statePatch:{agentId:state.agentId,sessionId:state.sessionId,expectedVersion:state.version,observationId:context.observation!.id,
+    const topic=context.messages.filter((m:any)=>m.from==='human'&&m.text.startsWith('SOAK_TOPIC_')).at(-1);
+    const previous=state.find((e:any)=>e.id==='soak-topic')?.text;
+    const speak=system.includes('Choose whether you want to SPEAK')&&topic&&previous!==topic.text;
+    const intent={act:'comment',intent:'Synthetic contribution to '+(topic?.text??'initial input'),replyTo:topic?.ref??null,addressedTo:[]};
+    action={type:'result',action:speak?{decision:'SPEAK',intent}:{decision:'ABSTAIN',reason:'synthetic owner chooses quiet'},state:{
       upsert:[{id:'soak-retained',kind:'interest',text:'SOAK_PRIVATE_OWNER_'+index,evidence:[],resume:null},...speak?[{id:'soak-topic',kind:'interest',text:topic!.text,evidence:[],resume:null}]:[]],remove:[]}};
   }
   res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(action)}}],...(index===1?{}:{usage:{prompt_tokens:23,completion_tokens:13}})}));

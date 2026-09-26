@@ -20,15 +20,13 @@ const server=createServer((request,response)=>{void(async()=>{
   let raw='';for await(const chunk of request){raw+=String(chunk);if(raw.length>1048576)throw new Error('SYNTHETIC_REQUEST_TOO_LARGE');}
   const input=JSON.parse(raw),system=input.messages.find((m:{role:string})=>m.role==='system')?.content;
   const context=JSON.parse(input.messages.find((m:{role:string})=>m.role==='user').content);
-  if(input.model!==profile.model||context.self.character.id!==character||!system.includes('synthetic persona '+character))throw new Error('SYNTHETIC_IDENTITY_MISMATCH');
-  const version=context.self.character.version;
-  if(version!==2)throw new Error('SYNTHETIC_CHARACTER_VERSION_MISMATCH');
+  if(input.model!==profile.model||context.self.name!==character||!system.includes('synthetic persona '+character))throw new Error('SYNTHETIC_IDENTITY_MISMATCH');
   calls++;
-  writeFileSync('/tmp/provider-proof.json',JSON.stringify({calls,uid:process.getuid?.(),model:profile.model,profileId:profile.id,profileVersion:profile.version,characterId:character,characterVersion:version,agentId:context.self.id,authenticationMatched:true,personaMatched:true,path}),{mode:0o600});
+  writeFileSync('/tmp/provider-proof.json',JSON.stringify({calls,uid:process.getuid?.(),model:profile.model,profileId:profile.id,profileVersion:profile.version,characterId:character,ownerName:context.self.name,authenticationMatched:true,personaMatched:true,path}),{mode:0o600});
   response.setHeader('content-type','application/json');
   if(fault){response.writeHead(429,{'retry-after':'60'});response.end('{"error":"synthetic rate limit"}');return;}
   const source=context.messages.find((m:{deleted:boolean})=>!m.deleted);
-  const result=context.delivery?.purpose==='memory'?{notes:source?[{text:'synthetic retained note for '+character,sourceMessageIds:[source.id]}]:[]}:{decision:'ABSTAIN',reason:'synthetic HTTP acceptance'};
+  const result=context.delivery?.purpose==='memory'?{type:'result',action:{notes:source?[{text:'synthetic retained note for '+character,sources:[source.ref]}]:[]},state:null}:{type:'result',action:{decision:'ABSTAIN',reason:'synthetic HTTP acceptance'},state:null};
   const content=JSON.stringify(profile.jsonMode==='schema'?{result}:result);
   response.end(JSON.stringify(profile.provider==='ollama'?{message:{content},done:true,done_reason:'stop',prompt_eval_count:20,eval_count:10}:{choices:[{finish_reason:'stop',message:{content}}],usage:{prompt_tokens:20,completion_tokens:10}}));
 })().catch(()=>{response.statusCode=500;response.end('{"error":"synthetic fixture assertion failed"}');});});

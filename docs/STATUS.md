@@ -12,6 +12,8 @@ PR #52の継続負荷/復旧/CLI/契約差分と、#53のsource/image配布・�
 
 PR #54は実登録76 APIと共有入力契約を対応付けるOpenAPI 3.1.1/CLI/オフライン出力、#55は診断記録が容量上限に達した実験でも結果・usage・検証済みDBを保持する変更です。実装・マージ・対象headのCI結果は各PRの確定記録で区別します。既存単体試験は維持し、新規受け入れは実HTTP/CLI/Core/Worker/SQLiteのE2Eです。
 
+PR #56で明示した長いモデル要求を最大900秒まで扱う通信経路を追加し、既定90秒・短いlease・停止後の遅着結果拒否を維持しました。実モデル試験から、LLM自身にAgent/session UUID、state version、observation hash、evidence version等のトランザクション情報を再出力させる旧モデル境界が不要な推論負荷になっていることも判明しました。現在のモデル境界は、LLMへ要求ローカルhandleと意味情報だけを提示し、Workerが厳格な内部commandへbindingする方式へ更新します。Core側の所有者/version/世代/根拠検査は緩和しません。詳細は`MODEL_PROTOCOL.md`。
+
 ## 要件別の判定
 
 | 要件 | mainで結合された機能 | 未実証・制限 |

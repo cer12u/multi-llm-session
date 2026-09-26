@@ -14,7 +14,7 @@ async function provider(index:number){
     const body=JSON.parse(Buffer.concat(chunks).toString());requests.push({path:req.url??'',authorization:req.headers.authorization??'',body});
     res.setHeader('content-type','application/json');
     if(unauthorized){res.statusCode=401;res.end(JSON.stringify({error:'synthetic unauthorized'}));return;}
-    const text=JSON.stringify({decision:'ABSTAIN',reason:'synthetic independent provider response'});
+    const text=JSON.stringify({type:'result',action:{decision:'ABSTAIN',reason:'synthetic independent provider response'},state:null});
     res.end(JSON.stringify(index===1?{done:true,message:{content:text},prompt_eval_count:17,eval_count:9}:{choices:[{finish_reason:'stop',message:{content:text}}],usage:{prompt_tokens:17,completion_tokens:9}}));
   });
   await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const address=server.address();if(!address||typeof address==='string')throw new Error('Missing provider port');
@@ -64,8 +64,8 @@ test('R8-UI-001: profiles created in the real editor route A/B/C independently a
     for(let i=0;i<3;i++){
       expect(providers[i].requests).toHaveLength(1);const sent=providers[i].requests[0];
       expect(sent.path).toBe(i===1?'/api/chat':'/v1/chat/completions');expect(sent.authorization).toBe('Bearer synthetic-key-value-'+i);expect(sent.body.model).toBe('synthetic-model-'+i);
-      const context=JSON.parse(sent.body.messages.find(m=>m.role==='user')!.content);expect(context.self.id).toBe(agents[i].id);
-      expect(context.self.character).toEqual(JSON.parse(agents[i].character_json));
+      const context=JSON.parse(sent.body.messages.find(m=>m.role==='user')!.content),character=JSON.parse(agents[i].character_json);
+      expect(context.self.name).toBe(character.name);expect(context.self.persona).toBe(character.persona);expect(JSON.stringify(context)).not.toContain(agents[i].id);
     }
     expect(providers[0].requests[0].body.max_completion_tokens).toBe(768);expect(providers[1].requests[0].body.options?.num_predict).toBe(768);
     expect(f.service.session(id).call_count).toBe(3);expect(f.service.session(id).bot_count).toBe(0);

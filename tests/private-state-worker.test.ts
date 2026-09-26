@@ -20,17 +20,17 @@ it('R2-STATE-016: three real WorkerRuntime→Core HTTP paths persist different s
     f.say('後でそれぞれが確認したいことを考えてください。');
     await app.listen({ host: '127.0.0.1', port: 0 });
     const address = app.server.address(); if (!address || typeof address === 'string') throw new Error('No test port');
-    const captured: Context[][] = [[], [], []];
+    const captured: any[][] = [[], [], []];
     const profile = ModelProfileSchema.parse({ id: 'synthetic', provider: 'openai', model: 'synthetic', baseUrl: 'https://synthetic.invalid/v1', authRequired: false });
     const workers = captured.map((inputs, index) => {
       // Provider HTTP transport is synthetic; the body below is what HttpModel actually sends.
       const fetcher: typeof fetch = async (_input, init) => {
         const request = JSON.parse(String(init!.body)) as { messages: { role: string; content: string }[] };
-        const context = JSON.parse(request.messages.find(m => m.role === 'user')!.content) as Context;
+        const context = JSON.parse(request.messages.find(m => m.role === 'user')!.content);
         inputs.push(context);
         const result = inputs.length === 1
-          ? { action: { decision: 'ABSTAIN', reason: '本人の疑問を残して聞く' }, statePatch: change(context, `個体${index}だけの私有疑問`) }
-          : { action: { decision: 'ABSTAIN', reason: '保持した疑問を次の入力で確認' }, statePatch: null };
+          ? { type:'result', action: { decision: 'ABSTAIN', reason: '本人の疑問を残して聞く' }, state:{upsert:[{id:'private-question',kind:'question',text:`個体${index}だけの私有疑問`,evidence:['m0'],resume:null}],remove:[]} }
+          : { type:'result', action: { decision: 'ABSTAIN', reason: '保持した疑問を次の入力で確認' }, state: null };
         return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(result) } }] }));
       };
       return new WorkerRuntime(new CoreClient(`http://127.0.0.1:${address.port}`, f.config.workerTokens[`worker-${index}`]), {},
@@ -44,9 +44,8 @@ it('R2-STATE-016: three real WorkerRuntime→Core HTTP paths persist different s
     await Promise.all(workers.map(w => w.once()));
     for (let i = 0; i < captured.length; i++) {
       expect(captured[i]).toHaveLength(2);
-      expect(captured[i][0].self.privateState!.entries).toHaveLength(0);
-      expect(captured[i][1].self.privateState!.version).toBe(1);
-      expect(captured[i][1].self.privateState!.entries[0].text).toBe(`個体${i}だけの私有疑問`);
+      expect(captured[i][0].self.state).toHaveLength(0);
+      expect(captured[i][1].self.state[0].text).toBe(`個体${i}だけの私有疑問`);
       for (let j = 0; j < captured.length; j++) if (j !== i) expect(JSON.stringify(captured[i][1])).not.toContain(`個体${j}だけの私有疑問`);
     }
     expect(f.service.session(f.id).call_count).toBe(6);
