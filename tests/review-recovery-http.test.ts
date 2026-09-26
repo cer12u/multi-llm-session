@@ -9,6 +9,7 @@ import { SessionService } from '../packages/session-service/index.js';
 import { buildServer } from '../apps/core/server.js';
 import { CoreClient,WorkerRuntime } from '../apps/agent-worker/runtime.js';
 import { modelRequest,MockModel } from '../packages/models/index.js';
+import { projectModelContext } from '../packages/models/model-protocol.js';
 import type { Context } from '../packages/contracts/index.js';
 
 it('R4-REVIEW-005: a reconstructed partial candidate survives Core reopen without losing text, coverage or original interest age',()=>{
@@ -57,7 +58,7 @@ it('R4-REVIEW-006: a real HTTP Worker carries the first correction across chunks
       const body=modelRequest(run.profile,kind,context,{maxChars:run.contextChars});
       const messages=body.messages as {role:string;content:string}[];
       expect(messages.find(m=>m.role==='system')!.content).toContain('REWRITE the entire working candidate');
-      expect(JSON.parse(messages.find(m=>m.role==='user')!.content)).toEqual(context);
+      expect(JSON.parse(messages.find(m=>m.role==='user')!.content)).toEqual(projectModelContext(context).context);
       expect(f.store.db.inTransaction).toBe(false);
       if(captured.length===1){expect(context.delta.some(m=>m.id===correction.id)).toBe(true);entered();await gate;}
       else expect(context.candidate!.text).toBe('集合は16時です。');

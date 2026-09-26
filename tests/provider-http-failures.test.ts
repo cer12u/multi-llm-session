@@ -23,7 +23,7 @@ it.each(['rate-limit','timeout','disconnect','missing-key','bad-output'] as cons
       if(mode==='disconnect'){req.socket.destroy();return;}
     }
     res.setHeader('content-type','application/json');
-    const content=key==='Bearer synthetic-a'&&mode==='bad-output'?'not valid model JSON':JSON.stringify({decision:'ABSTAIN',reason:'independent synthetic success'});
+    const content=key==='Bearer synthetic-a'&&mode==='bad-output'?'not valid model JSON':JSON.stringify({type:'result',action:{decision:'ABSTAIN',reason:'independent synthetic success'},state:null});
     res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content}}],usage:{prompt_tokens:13,completion_tokens:7}}));
   });
   const app=buildServer(f.service,{timers:false});

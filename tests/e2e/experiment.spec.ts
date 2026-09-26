@@ -8,23 +8,23 @@ import {join,resolve as absolute} from 'node:path';
 /** CLI -> production Core/three Worker processes -> real loopback HTTP -> private persisted result. */
 test('R10-EXPERIMENT-E2E: preflight has no requests; an approved bounded run retains private evidence and rejects unsafe execution',async()=>{
   test.setTimeout(90000);
-  const root=mkdtempSync(join(tmpdir(),'experiment-acceptance-')),owners=new Set<string>(),models=new Set<string>();let calls=0;
+  const root=mkdtempSync(join(tmpdir(),'experiment-acceptance-')),modelOwners=new Set<string>(),models=new Set<string>(),providerRequests:string[]=[];let calls=0;
   const provider=createServer(async(req,res)=>{
     const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));
-    const input=JSON.parse(Buffer.concat(chunks).toString()),context=JSON.parse(input.messages.find((m:{role:string})=>m.role==='user').content);
-    calls++;owners.add(context.self.id);models.add(input.model);
+    const raw=Buffer.concat(chunks).toString();providerRequests.push(raw);const input=JSON.parse(raw),context=JSON.parse(input.messages.find((m:{role:string})=>m.role==='user').content);
+    expect(input.response_format?.type).toBe('json_schema');expect(input.messages.find((m:{role:string})=>m.role==='system').content).not.toContain('expectedVersion');
+    calls++;modelOwners.add(context.self.name);models.add(input.model);
     const index=Number(String(input.model).split('-').at(-1));
     expect(req.headers.authorization).toBe('Bearer synthetic-experiment-key-'+index);
-    const memory=input.messages[0].content.includes('Process exactly the supplied unprocessed delivery window');
-    const state=context.self.privateState,original=context.messages.find((m:{deleted:boolean})=>!m.deleted);
-    const output=memory?{notes:[]}:!context.retrieved&&original?{decision:'LOOKUP',requests:[{kind:'message',query:original.id,cursor:null}]}:
-      {action:{decision:'ABSTAIN',reason:'synthetic quiet'},statePatch:{agentId:state.agentId,sessionId:state.sessionId,expectedVersion:state.version,observationId:context.observation.id,
-        upsert:[{id:'retained',kind:'interest',text:'PRIVATE_EXPERIMENT_CANARY',evidence:[],resume:null}],remove:[]}};
-    res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(output)}}],usage:{...index!==2?{prompt_tokens:19}:{},...index!==1?{completion_tokens:11}:{}}}));
+    const memory=context.delivery?.purpose==='memory';
+    const original=context.messages.find((m:{deleted:boolean})=>!m.deleted);
+    const output=memory?{type:'result',action:{notes:[]},state:null}:!context.retrieved?.length&&original?{type:'lookup',requests:[{kind:'message',ref:original.ref}]}:
+      {type:'result',action:{decision:'ABSTAIN',reason:'synthetic quiet'},state:{upsert:[{id:'retained',kind:'interest',text:'PRIVATE_EXPERIMENT_CANARY',evidence:[],resume:null}],remove:[]}};
+    res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify({result:output})}}],usage:{...index!==2?{prompt_tokens:19}:{},...index!==1?{completion_tokens:11}:{}}}));
   });
   await new Promise<void>(resolve=>provider.listen(0,'127.0.0.1',resolve));const port=(provider.address() as {port:number}).port;
   const approvedCommit=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
-  const profiles=Array.from({length:3},(_,i)=>({id:'profile-'+i,provider:'openai',model:'synthetic-'+i,baseUrl:`http://127.0.0.1:${port}/v1`,allowLocalHttp:true,authRequired:true,apiKeyEnv:'SYNTHETIC_EXPERIMENT_KEY_'+i,maxOutputTokens:512,jsonMode:'json'}));
+  const profiles=Array.from({length:3},(_,i)=>({id:'profile-'+i,provider:'openai',model:'synthetic-'+i,baseUrl:`http://127.0.0.1:${port}/v1`,allowLocalHttp:true,authRequired:true,apiKeyEnv:'SYNTHETIC_EXPERIMENT_KEY_'+i,maxOutputTokens:512,jsonMode:'schema'}));
   const characters=Array.from({length:3},(_,i)=>({schemaVersion:1,id:'character-'+i,version:1,name:'Synthetic '+i,persona:'Independent synthetic participant '+i,presentationRef:null}));
   const manifest={schemaVersion:1,approvedCommit,evidenceMode:'synthetic',purpose:'smoke',scenario:'transport-and-quiet',initialText:'A single initial synthetic topic',profiles,characters,
     participants:profiles.map((p,i)=>({slot:'worker-'+i,profileId:p.id,characterId:characters[i].id})),
@@ -57,11 +57,12 @@ test('R10-EXPERIMENT-E2E: preflight has no requests; an approved bounded run ret
     expect(foreignDenied.status,foreignDenied.err+foreignDenied.out).toBe(2);expect(foreignDenied.out).toContain('APPROVED_COMMIT_MISMATCH');expect(calls).toBe(0);
     writeFileSync(file,JSON.stringify(manifest));const ready=await invoke(['preflight',file],foreign);expect(ready.status,ready.err+ready.out).toBe(0);expect(JSON.parse(ready.out).status).toBe('READY');expect(calls).toBe(0);
     const run=await invoke(['execute',file,output],foreign);expect(run.status,run.err+run.out).toBe(0);
-    expect(run.out).not.toContain('PRIVATE_EXPERIMENT_CANARY');expect(owners.size).toBe(3);expect(models.size).toBe(3);expect(calls).toBeLessThanOrEqual(manifest.bounds.maxCalls);
+    expect(run.out).not.toContain('PRIVATE_EXPERIMENT_CANARY');expect(modelOwners.size).toBe(3);expect(models.size).toBe(3);expect(calls).toBeLessThanOrEqual(manifest.bounds.maxCalls);
     const result=JSON.parse(readFileSync(join(output,'result.json'),'utf8'));
     expect(result).toMatchObject({status:'EXECUTED',evidenceMode:'synthetic',semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,exitReason:'VOLUNTARY_QUIET',recordingStatus:'SAVED',privateRecording:'private-recording.ndjson',privateDatabase:{path:'private-database.sqlite',integrity:'ok'}});
     expect(result.preflightNetworkCalls).toBe(0);expect(result.modelCalls).toBe(calls);expect(result.networkCalls).toBeUndefined();
-    expect(new Set(result.usage.byAgent.map((r:{agentId:string})=>r.agentId))).toEqual(owners);
+    const internalOwners=result.usage.byAgent.map((r:{agentId:string})=>r.agentId);expect(new Set(internalOwners).size).toBe(3);
+    const wire=providerRequests.join('\n');for(const owner of internalOwners)expect(wire).not.toContain(owner);for(const forbidden of ['expectedVersion','observationId','sessionId','profileHash','privateState'])expect(wire).not.toContain(forbidden);
     expect(result.usage.byAgent.reduce((n:number,r:{calls:number})=>n+r.calls,0)).toBe(calls);
     const primary=result.usage.calls.find((r:{kind:string;stage:string})=>r.kind==='decide'&&r.stage==='primary');
     expect(primary.missingUsage).toBe(2);expect(primary.missingInput).toBe(1);expect(primary.missingOutput).toBe(1);
@@ -72,7 +73,7 @@ test('R10-EXPERIMENT-E2E: preflight has no requests; an approved bounded run ret
     const before=calls,again=await invoke(['execute',file,output]);expect(again.status).not.toBe(0);expect(calls).toBe(before);
     // A real second bounded run lowers only its recording quota. Neither the Core
     // export guard nor its HTTP/model/storage paths are replaced for this case.
-    const limited=join(root,'limited-recording'),firstCalls=calls,firstOwners=owners.size;
+    const limited=join(root,'limited-recording'),firstCalls=calls;
     writeFileSync(file,JSON.stringify({...manifest,recordingMaxBytes:1024}));
     const limitedRun=await invoke(['execute',file,limited]);expect(limitedRun.status,limitedRun.err+limitedRun.out).toBe(0);
     const summary=JSON.parse(limitedRun.out);expect(summary.recordingStatus).toBe('SIZE_LIMIT');expect(summary.privateDatabaseRetained).toBe(true);
@@ -80,7 +81,7 @@ test('R10-EXPERIMENT-E2E: preflight has no requests; an approved bounded run ret
     expect(limitedResult).toMatchObject({status:'EXECUTED',recordingStatus:'SIZE_LIMIT',recordingMaxBytes:1024,privateRecording:null,semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,
       privateDatabase:{path:'private-database.sqlite',integrity:'ok',rows:{agent_private_states:3}}});
     expect(limitedResult.recordingWarning).toContain('No complete NDJSON replay');
-    expect(limitedResult.modelCalls).toBe(calls-firstCalls);expect(calls-firstCalls).toBeLessThanOrEqual(manifest.bounds.maxCalls);expect(owners.size-firstOwners).toBe(3);
+    expect(limitedResult.modelCalls).toBe(calls-firstCalls);expect(calls-firstCalls).toBeLessThanOrEqual(manifest.bounds.maxCalls);expect(new Set(limitedResult.usage.byAgent.map((r:{agentId:string})=>r.agentId)).size).toBe(3);
     expect(existsSync(join(limited,'private-recording.ndjson'))).toBe(false);expect(existsSync(join(limited,'failure.json'))).toBe(false);
     expect(readdirSync(limited).some(name=>name.includes('.partial-'))).toBe(false);
     expect(existsSync(join(limited,'resources.json'))).toBe(true);expect(statSync(join(limited,'private-database.sqlite')).mode&0o077).toBe(0);
@@ -92,7 +93,7 @@ test('R10-EXPERIMENT-E2E: preflight has no requests; an approved bounded run ret
     const inspected=await storage(['inspect',restored]);expect(inspected.rows).toEqual(limitedResult.privateDatabase.rows);
     expect(inspected.rows.agent_private_states).toBe(3);expect(inspected.rows.messages).toBe(1);
     expect(statSync(restored).mode&0o077).toBe(0);
-    mkdirSync('artifacts',{recursive:true});writeFileSync('artifacts/experiment-e2e.json',JSON.stringify({mode:'synthetic-http-e2e',owners:firstOwners,calls:firstCalls,preflightNoSend:true,privateFiles:true,refusesOverwrite:true,executableCheckoutBound:true,perOwnerUsage:true,partialUsageCounted:true,
-      boundedRecording:{byteLimit:1024,status:limitedResult.recordingStatus,calls:calls-firstCalls,owners:owners.size-firstOwners,resultRetained:true,privateDatabaseRestored:true,partialFilesRemoved:true},semanticAcceptance:'NOT_EVALUATED'}));
+    mkdirSync('artifacts',{recursive:true});writeFileSync('artifacts/experiment-e2e.json',JSON.stringify({mode:'synthetic-http-e2e',owners:3,calls:firstCalls,preflightNoSend:true,privateFiles:true,refusesOverwrite:true,executableCheckoutBound:true,perOwnerUsage:true,partialUsageCounted:true,semanticModelProtocol:true,maxProviderRequestBytes:Math.max(...providerRequests.map(value=>Buffer.byteLength(value))),
+      boundedRecording:{byteLimit:1024,status:limitedResult.recordingStatus,calls:calls-firstCalls,owners:3,resultRetained:true,privateDatabaseRestored:true,partialFilesRemoved:true},semanticAcceptance:'NOT_EVALUATED'}));
   }finally{provider.closeAllConnections();await new Promise<void>(resolve=>provider.close(()=>resolve()));rmSync(root,{recursive:true,force:true});}
 });
