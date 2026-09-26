@@ -1,4 +1,4 @@
-// Explicitly authorized real-model E2E: source CLI -> Core -> 3 OS Workers ->
+// Retry after authoritative branch typecheck fix.\n// Explicitly authorized real-model E2E: source CLI -> Core -> 3 OS Workers ->
 // unmodified model HTTP messages (observed by a loopback proxy) -> real SQLite.
 import {createServer,request as httpRequest} from 'node:http';
 import {spawn} from 'node:child_process';
