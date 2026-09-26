@@ -1,0 +1,103 @@
+name: Explicit free local-model evaluation
+on:
+  push:
+    branches: [eval/free-local-model-20260926]
+    paths: [.github/workflows/free-local-eval.yml]
+permissions:
+  contents: read
+concurrency:
+  group: free-local-model-evaluation
+  cancel-in-progress: false
+jobs:
+  real-model:
+    if: github.repository == 'cer12u/multi-llm-session'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    env:
+      MODEL_NAME: qwen3:4b-instruct-2507-q4_K_M
+      MODEL_IMAGE: ollama/ollama:0.34.4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: Install the approved application's locked dependencies
+        run: npm ci
+      - name: Start an isolated CPU-only model service, without a cloud account
+        run: |
+          docker pull "$MODEL_IMAGE"
+          docker run -d --name mls-real-model --cpus=4 --memory=10g --cap-drop=ALL --security-opt=no-new-privileges -p 127.0.0.1:11434:11434 -e OLLAMA_NO_CLOUD=1 -e OLLAMA_CONTEXT_LENGTH=65536 -e OLLAMA_NUM_PARALLEL=1 -e OLLAMA_MAX_LOADED_MODELS=1 -e OLLAMA_KEEP_ALIVE=15m "$MODEL_IMAGE"
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:11434/api/version > "$RUNNER_TEMP/ollama-version.json"; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:11434/api/version > "$RUNNER_TEMP/ollama-version.json"
+          timeout 300 docker exec mls-real-model ollama pull "$MODEL_NAME"
+          docker image inspect "$MODEL_IMAGE" --format '{{.Id}}' > "$RUNNER_TEMP/ollama-image-id.txt"
+          curl --fail --silent http://127.0.0.1:11434/api/tags > "$RUNNER_TEMP/ollama-tags.json"
+      - name: Invoke the unchanged application with three independent Workers and hard bounds
+        env:
+          ALLOW_LIVE_MODELS: '1'
+        run: |
+          node --input-type=module <<'NODE'
+          import {writeFileSync} from 'node:fs';
+          import {join} from 'node:path';
+          const names=['ソラ','ナギ','リン'];
+          const traits=['気になる点を具体的に考える。','実用性と使いやすさを重視する。','楽しい工夫や雰囲気を考える。'];
+          const m={schemaVersion:1,approvedCommit:process.env.GITHUB_SHA,evidenceMode:'live',purpose:'smoke',scenario:'free-local-reading-room',
+            initialText:'架空の小さな読書室を作るなら、どんな場所にしたい？静かに読む人と、感想を少し話したい人の両方が過ごせるといいと思う。',
+            profiles:[{id:'qwen-local',provider:'ollama',model:process.env.MODEL_NAME,baseUrl:'http://127.0.0.1:11434/api',allowLocalHttp:true,authRequired:false,jsonMode:'schema',maxOutputTokens:1024,temperature:0.6,maxConcurrent:1,contextWindowTokens:65536}],
+            characters:names.map((name,i)=>({schemaVersion:1,id:'local-'+i,version:1,name,persona:traits[i]+'日本語で自然に短く話す。他者の発言を読み、必要なら意見を変える。話す必要がなければ沈黙する。',presentationRef:null})),
+            participants:names.map((_,i)=>({slot:'worker-'+i,profileId:'qwen-local',characterId:'local-'+i})),
+            bounds:{maxCalls:18,maxPosts:6,durationMs:360000,maxOutputTokens:1024,maxTokens:2000000},quietStopMs:10000,
+            settings:{selfWakeEnabled:false,idleMs:60000,requestTimeoutMs:180000,leaseMs:180000,maxRetries:1,memoryEvery:3,memoryFlushMs:30000,memoryShareEvery:3,contextMessages:8,contextChars:24000,contextTokens:65536,debounceMs:0,directedDebounceMs:0,maxCoalesceMs:0}};
+          writeFileSync(join(process.env.RUNNER_TEMP,'real-manifest.json'),JSON.stringify(m),{flag:'wx',mode:0o600});
+          NODE
+          node --import tsx apps/cli/experiment.ts preflight "$RUNNER_TEMP/real-manifest.json"
+          timeout --signal=TERM --kill-after=20s 480 node --import tsx apps/cli/experiment.ts execute "$RUNNER_TEMP/real-manifest.json" "$RUNNER_TEMP/real-session" > "$RUNNER_TEMP/real-stdout.txt" 2> "$RUNNER_TEMP/real-stderr.txt"
+      - name: Extract aggregate evidence without publishing private dialogue or prompts
+        if: always()
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync,existsSync,mkdirSync,writeFileSync} from 'node:fs';
+          import {join} from 'node:path';
+          const temp=process.env.RUNNER_TEMP,read=(p)=>existsSync(p)?JSON.parse(readFileSync(p,'utf8')):null;
+          const result=read(join(temp,'real-session/result.json')),failure=read(join(temp,'real-session/failure.json'));
+          const tags=read(join(temp,'ollama-tags.json')),version=read(join(temp,'ollama-version.json'));
+          const model=tags?.models?.find(m=>m.name===process.env.MODEL_NAME);
+          let stateOwners=0,nonemptyStates=0,memories=0,acceptedByKind={},failedByKind={},errorCodes={},authors=0,botPosts=0,evidenceLinks=0;
+          const dbPath=join(temp,'real-session/session.sqlite');
+          if(existsSync(dbPath)){
+            const {default:Database}=await import('better-sqlite3');const db=new Database(dbPath,{readonly:true,fileMustExist:true});
+            try{
+              const states=db.prepare('SELECT entries_json FROM agent_private_states').all();stateOwners=states.length;nonemptyStates=states.filter(s=>JSON.parse(s.entries_json).length>0).length;
+              memories=db.prepare('SELECT COUNT(*) n FROM memories').get().n;
+              for(const r of db.prepare('SELECT kind,state,COUNT(*) n FROM runs GROUP BY kind,state').all())(r.state==='SUCCEEDED'?acceptedByKind:failedByKind)[r.kind+':'+r.state]=r.n;
+              for(const r of db.prepare('SELECT error_code,COUNT(*) n FROM llm_calls WHERE error_code IS NOT NULL GROUP BY error_code').all())errorCodes[r.error_code]=r.n;
+              const rows=db.prepare('SELECT author_id,reply_to,addressed_json FROM messages WHERE author_id IS NOT NULL').all();botPosts=rows.length;authors=new Set(rows.map(r=>r.author_id)).size;evidenceLinks=rows.filter(r=>r.reply_to!==null).length;
+            }finally{db.close();}
+          }
+          const report={mode:'real-local-model-application-evaluation',sourceSha:process.env.GITHUB_SHA,model:process.env.MODEL_NAME,modelDigest:model?.digest??null,ollamaVersion:version?.version??null,
+            imageId:existsSync(join(temp,'ollama-image-id.txt'))?readFileSync(join(temp,'ollama-image-id.txt'),'utf8').trim():null,
+            externalInferenceRequests:0,paidInference:false,syntheticModel:false,syntheticPersonas:true,
+            execution:result?.status??failure?.status??'NO_EXECUTION_RESULT',failureCode:failure?.code??null,elapsedMs:result?.elapsedMs??null,exitReason:result?.exitReason??null,
+            modelCalls:result?.modelCalls??0,calls:result?.usage?.calls??[],byAgent:result?.usage?.byAgent??[],publicPosts:botPosts,distinctPublicAuthors:authors,replyLinkedPosts:evidenceLinks,
+            stateOwners,nonemptyStates,memories,acceptedByKind,failedByKind,errorCodes,recordingStatus:result?.recordingStatus??null,
+            semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,privateTranscriptPublished:false,bounds:{maxCalls:18,maxPosts:6,durationMs:360000,maxOutputTokens:1024,maxTokens:2000000}};
+          mkdirSync('artifacts/free-local-evaluation',{recursive:true});writeFileSync('artifacts/free-local-evaluation/result.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report));
+          NODE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: free-local-model-${{ github.run_id }}
+          path: artifacts/free-local-evaluation/result.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Remove only this run's model container and private evidence
+        if: always()
+        run: |
+          docker rm -f mls-real-model || true
+          rm -rf -- "$RUNNER_TEMP/real-session" "$RUNNER_TEMP/real-manifest.json" "$RUNNER_TEMP/real-stdout.txt" "$RUNNER_TEMP/real-stderr.txt"
