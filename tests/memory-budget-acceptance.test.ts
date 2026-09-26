@@ -3,6 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {fixture} from './helpers.js';
 import {ModelProfileSchema} from '../packages/contracts/index.js';
 import {HttpModel,modelRequest,estimatedRequestTokens} from '../packages/models/index.js';
+import {projectModelContext} from '../packages/models/model-protocol.js';
 import {boundedContext} from '../packages/models/context-budget.js';
 
 it('R5-BUDGET-020: the captured HTTP body matches acknowledged context and includes schema, framing and reserved output in its conservative budget',async()=>{
@@ -19,7 +20,8 @@ it('R5-BUDGET-020: the captured HTTP body matches acknowledged context and inclu
     await model.complete(run.kind,run.context,{signal:new AbortController().signal,maxChars:run.contextChars});
     expect(body).toEqual(modelRequest(p,run.kind,run.context,{maxChars:run.contextChars}));
     const supplied=JSON.parse((body!.messages as {role:string;content:string}[]).find(m=>m.role==='user')!.content);
-    expect(supplied).toEqual(run.context);expect(supplied.messages.some((m:{id:string;revision:number;text:string})=>m.id===source.id&&m.revision===source.revision&&m.text===source.text)).toBe(true);
+    expect(supplied).toEqual(projectModelContext(run.context).context);expect(supplied.messages.some((m:{ref:string;text:string})=>m.ref==='m0'&&m.text===source.text)).toBe(true);
+    expect(JSON.stringify(supplied)).not.toContain(run.context.self.id);expect(JSON.stringify(supplied)).not.toContain(run.context.observation!.id);
     expect(estimatedRequestTokens(body!)+p.maxOutputTokens).toBeLessThanOrEqual(run.context.inputBudget!.maxTokens);
     const worst=modelRequest(p,run.kind,run.context,{maxChars:run.contextChars,repair:'\u0000'.repeat(2000)});
     expect(estimatedRequestTokens(worst)+p.maxOutputTokens).toBeLessThanOrEqual(run.context.inputBudget!.maxTokens);

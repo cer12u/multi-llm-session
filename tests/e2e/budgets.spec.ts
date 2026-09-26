@@ -16,11 +16,10 @@ test('R8-BUDGET-E2E: reservations, unknown usage, shared scope, renewal, real re
     const chunks:Buffer[]=[];for await(const chunk of req)chunks.push(Buffer.from(chunk));
     const request=JSON.parse(Buffer.concat(chunks).toString()),context=JSON.parse(request.messages.find((m:{role:string})=>m.role==='user').content);
     const system=request.messages[0].content as string;requests++;
-    await new Promise(resolve=>setTimeout(resolve,context.self.character.id==='rin'?50:10));
-    const state=context.self.privateState,source=context.messages.find((m:{deleted:boolean})=>!m.deleted);
-    const output=system.includes('Process exactly the supplied unprocessed delivery window')?{notes:source?[{text:'Retained synthetic evidence',sourceMessageIds:[source.id]}]:[]}:
-      {action:{decision:'ABSTAIN',reason:'independent quiet'},statePatch:{agentId:state.agentId,sessionId:state.sessionId,expectedVersion:state.version,observationId:context.observation.id,
-        upsert:[{id:'held',kind:'interest',text:'SYNTHETIC_RETAINED_BUDGET_INTEREST',evidence:[],resume:null}],remove:[]}};
+    await new Promise(resolve=>setTimeout(resolve,context.self.name==='リン'?50:10));
+    const source=context.messages.find((m:{deleted:boolean})=>!m.deleted);
+    const output=context.delivery?.purpose==='memory'?{type:'result',action:{notes:source?[{text:'Retained synthetic evidence',sources:[source.ref]}]:[]},state:null}:
+      {type:'result',action:{decision:'ABSTAIN',reason:'independent quiet'},state:{upsert:[{id:'held',kind:'interest',text:'SYNTHETIC_RETAINED_BUDGET_INTEREST',evidence:[],resume:null}],remove:[]}};
     res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(output)}}],...reported?{usage:{prompt_tokens:17,completion_tokens:9}}:{}}));
   });
   await new Promise<void>(resolve=>provider.listen(0,'127.0.0.1',resolve));const providerPort=(provider.address() as {port:number}).port;
