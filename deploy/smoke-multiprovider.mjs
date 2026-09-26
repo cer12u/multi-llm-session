@@ -60,7 +60,7 @@ try{
       },'three independent memory results');
       await api(`/v1/sessions/${id}/pause`,{});
       const proofs=workers.map(w=>JSON.parse(shell([...args,'exec','-T',w.id,'node','-e',"console.log(require('fs').readFileSync('/tmp/provider-proof.json','utf8'))"])));
-      assert.equal(new Set(proofs.map(p=>p.agentId)).size,3);
+      assert.equal(new Set(proofs.map(p=>p.ownerName)).size,3);
       for(const [i,proof] of proofs.entries()){
         assert.ok(proof.uid>0);assert.equal(proof.authenticationMatched,true);assert.equal(proof.personaMatched,true);
         assert.equal(proof.characterId,characters[i].id);assert.equal(proof.profileVersion,profiles[scenario==='shared'?0:i].version);assert.ok(proof.calls>=2);
