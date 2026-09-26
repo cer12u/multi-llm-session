@@ -145,7 +145,7 @@ export type PublicMessage = {
   characterId: string | null; characterVersion: number | null; text: string; act: string;
   replyTo: string | null; addressedTo: string[]; deleted: boolean; episode: number; createdAt: number;
 };
-export type PublicAgent = { id: string; slot: string; characterId: Slug, characterVersion: number; name: string;
+export type PublicAgent = { id: string; slot: string; characterId: string; characterVersion: number; name: string;
   presentationRef: string | null; profileId: string; enabled: boolean; status: string; workerOnline: boolean; lastSeenAt: number | null; nextRetryAt: number | null };
 export type PublicSession = { id: string; title: string; lifecycle: Lifecycle; activity: Activity; revision: number;
   epoch: number; createdAt: number; startedAt: number | null; stopReason: string | null;
