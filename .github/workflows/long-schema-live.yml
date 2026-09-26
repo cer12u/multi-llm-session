@@ -1,0 +1,79 @@
+name: Explicit long-wait real schema E2E
+on:
+  push:
+    branches: [fix/long-model-schema-e2e-20260926]
+    paths: [.github/workflows/long-schema-live.yml, deploy/live-schema/run.mjs]
+permissions:
+  contents: read
+concurrency:
+  group: long-schema-live
+  cancel-in-progress: false
+jobs:
+  real-schema:
+    if: github.repository == 'cer12u/multi-llm-session'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      MODEL_NAME: qwen3:4b-instruct-2507-q4_K_M
+      ALLOW_LIVE_MODELS: '1'
+      EVIDENCE_PUBLIC_KEY: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA1t489tS31dBIQSfPoNV3
+        A+AJBas5AoOdgRWIDFCCY27AthQSuO7WG0fgauNfKcAwcZxMeFRBdByYyiSBpi4r
+        ZnXV3ofSv5IXJtvATdploILmiIH4lLWhqTjTj/AQ4rrTAfxYyXYW5+dxz3sUqzOa
+        j1KkwUTadoxEcGAaKndYuY+PSDyLH42eLfSbPDIVuo8HkdrG+M3hio+SkVwfSvjH
+        sCsSl3cIg5+vExEhDxc9N4g/QKGMEzZXmJDcff8tUSNDA5voiT+aWWhUJEi53Wvb
+        T7bEQuoDd+9UyeOKtcVKSEgHxfzdzGYDxAmy/iXblpU2RpObpWoEAdixdUR2n7TL
+        NkDqICqfXnc4wTTjf7nW7FPoZO6n0zn/H+r9Zv9dtcoKkKv4Jryy19SUvbiz06ez
+        uDgjU5Iq62DpT/emYz8JTpfhNr9/vqLZeP4bX4dgZnQ9V+KShkjQIb8whjpRJlq5
+        ebB5hXa0sc8brTm6aIh8aQLM6ktxuC5vMM2SmyFcEhG3AgMBAAE=
+        -----END PUBLIC KEY-----
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Start the pinned CPU-only local model without a cloud key
+        run: |
+          docker pull ollama/ollama:0.34.4
+          test "$(docker image inspect ollama/ollama:0.34.4 --format '{{.Id}}')" = 'sha256:7fe01b0ef22e342fcbcb61e89d39de511609f078c30754a3a0bee7bb0f20a5c2'
+          docker run -d --name mls-schema-model --cpus=4 --memory=12g --cap-drop=ALL --security-opt=no-new-privileges -p 127.0.0.1:11434:11434 -e OLLAMA_NO_CLOUD=1 -e OLLAMA_FLASH_ATTENTION=1 -e OLLAMA_KV_CACHE_TYPE=q8_0 -e OLLAMA_CONTEXT_LENGTH=65536 -e OLLAMA_NUM_PARALLEL=1 -e OLLAMA_MAX_LOADED_MODELS=1 -e OLLAMA_KEEP_ALIVE=60m ollama/ollama:0.34.4
+          for i in $(seq 1 60); do if curl --fail --silent http://127.0.0.1:11434/api/version > "$RUNNER_TEMP/ollama-version.json"; then break; fi; sleep 1; done
+          timeout 300 docker exec mls-schema-model ollama pull "$MODEL_NAME" > "$RUNNER_TEMP/pull.log" 2>&1
+          node --input-type=module <<'NODE'
+          import {writeFileSync} from 'node:fs';import {join} from 'node:path';
+          const models=(await(await fetch('http://127.0.0.1:11434/api/tags')).json()).models;
+          const model=models.find(m=>m.name===process.env.MODEL_NAME);
+          if(model?.digest!=='0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0')throw new Error('MODEL_DIGEST_CHANGED');
+          writeFileSync(join(process.env.RUNNER_TEMP,'model-identity.json'),JSON.stringify(model));
+          NODE
+      - name: Actual application schema-mode inference, bounded to twelve calls and forty-five minutes
+        run: node --import tsx deploy/live-schema/run.mjs
+      - name: Preserve safe runtime evidence
+        if: always()
+        run: |
+          mkdir -p artifacts/live-schema
+          for name in model-identity.json ollama-version.json; do if test -f "$RUNNER_TEMP/$name"; then cp "$RUNNER_TEMP/$name" artifacts/live-schema/; fi; done
+          docker inspect mls-schema-model --format '{{json .State}}' > artifacts/live-schema/model-state.json || true
+          docker stats mls-schema-model --no-stream --format '{{json .}}' > artifacts/live-schema/model-resources.json || true
+          node --input-type=module <<'NODE'
+          import {writeFileSync} from 'node:fs';import {cpus,totalmem} from 'node:os';
+          writeFileSync('artifacts/live-schema/environment.json',JSON.stringify({sha:process.env.GITHUB_SHA,node:process.version,cpuModel:cpus()[0]?.model,cpuCount:cpus().length,totalMemory:totalmem(),paidInference:false},null,2));
+          NODE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: long-schema-live-${{ github.run_id }}
+          path: artifacts/live-schema/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Remove only the created test model and private temporary files
+        if: always()
+        run: |
+          docker rm -f mls-schema-model || true
+          rm -rf -- "$RUNNER_TEMP/schema-session" "$RUNNER_TEMP/schema-manifest.json" "$RUNNER_TEMP/pull.log"
