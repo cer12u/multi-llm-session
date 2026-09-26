@@ -1,0 +1,101 @@
+name: Explicit free public-model evaluation
+on:
+  push:
+    branches: [eval/free-public-model-20260926]
+    paths: [.github/workflows/free-public-eval.yml]
+permissions:
+  contents: read
+concurrency:
+  group: free-public-model-evaluation
+  cancel-in-progress: false
+jobs:
+  real-provider:
+    if: github.repository == 'cer12u/multi-llm-session'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      MODEL_NAME: big-pickle
+      MODEL_BASE_URL: https://opencode.ai/zen/v1
+      # Literal public access identifier used by OpenCode's official free-model client.
+      # No user account, private key, payment method, paid model or fallback is used.
+      PUBLIC_MODEL_ACCESS: public
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - run: npm ci
+      - name: One bounded synthetic connectivity probe, with no retries or paid fallback
+        run: |
+          node --input-type=module <<'NODE'
+          import {writeFileSync} from 'node:fs';import {join} from 'node:path';
+          const started=Date.now();let proof={attempts:1,model:process.env.MODEL_NAME,httpStatus:null,elapsedMs:0,nonemptyContent:false,finishReason:null,usage:null,error:null};
+          try{
+            const r=await fetch(process.env.MODEL_BASE_URL+'/chat/completions',{method:'POST',redirect:'error',signal:AbortSignal.timeout(45000),headers:{'content-type':'application/json',authorization:'Bearer '+process.env.PUBLIC_MODEL_ACCESS},body:JSON.stringify({model:process.env.MODEL_NAME,messages:[{role:'user',content:'Reply with the JSON object {"ok":true} only.'}],max_tokens:128,temperature:0,stream:false})});
+            proof.httpStatus=r.status;
+            if(!r.ok){await r.body?.cancel();proof.error='PROBE_HTTP_'+r.status;process.exitCode=1;}
+            else{const b=await r.json();const c=b.choices?.[0];proof.nonemptyContent=typeof c?.message?.content==='string'&&c.message.content.trim().length>0;proof.finishReason=c?.finish_reason??null;proof.usage=b.usage?{input:b.usage.prompt_tokens??null,output:b.usage.completion_tokens??null}:null;if(!proof.nonemptyContent){proof.error='PROBE_EMPTY';process.exitCode=1;}}
+          }catch{proof.error='PROBE_TRANSPORT_FAILED';process.exitCode=1;}
+          proof.elapsedMs=Date.now()-started;writeFileSync(join(process.env.RUNNER_TEMP,'public-probe.json'),JSON.stringify(proof),{mode:0o600});
+          console.log(JSON.stringify(proof));
+          NODE
+      - name: Execute the unchanged application with three separate owners and Workers
+        env:
+          ALLOW_LIVE_MODELS: '1'
+        run: |
+          node --input-type=module <<'NODE'
+          import {writeFileSync} from 'node:fs';import {join} from 'node:path';
+          const names=['ソラ','ナギ','リン'],traits=['気になる点を具体的に考える。','実用性と使いやすさを重視する。','楽しい工夫や雰囲気を考える。'];
+          const manifest={schemaVersion:1,approvedCommit:process.env.GITHUB_SHA,evidenceMode:'live',purpose:'smoke',scenario:'free-public-reading-room',
+            initialText:'架空の小さな読書室を作るなら、どんな場所にしたい？静かに読む人と、感想を少し話したい人の両方が過ごせるといいと思う。',
+            profiles:[{id:'public-free',provider:'openai',model:process.env.MODEL_NAME,baseUrl:process.env.MODEL_BASE_URL,apiKeyEnv:'PUBLIC_MODEL_ACCESS',authRequired:true,jsonMode:'none',maxOutputTokens:1536,temperature:0.6,maxConcurrent:1,contextWindowTokens:65536}],
+            characters:names.map((name,i)=>({schemaVersion:1,id:'public-'+i,version:1,name,persona:traits[i]+'日本語で自然に短く話す。他者の発言を読み、必要なら意見を変える。話す必要がなければ沈黙する。',presentationRef:null})),
+            participants:names.map((_,i)=>({slot:'worker-'+i,profileId:'public-free',characterId:'public-'+i})),
+            bounds:{maxCalls:24,maxPosts:8,durationMs:240000,maxOutputTokens:1536,maxTokens:3000000},quietStopMs:10000,
+            settings:{selfWakeEnabled:false,idleMs:60000,requestTimeoutMs:60000,leaseMs:90000,maxRetries:0,memoryEvery:3,memoryFlushMs:15000,memoryShareEvery:3,contextMessages:8,contextChars:24000,contextTokens:65536,debounceMs:0,directedDebounceMs:0,maxCoalesceMs:0}};
+          writeFileSync(join(process.env.RUNNER_TEMP,'public-manifest.json'),JSON.stringify(manifest),{flag:'wx',mode:0o600});
+          NODE
+          node --import tsx apps/cli/experiment.ts preflight "$RUNNER_TEMP/public-manifest.json"
+          timeout --signal=TERM --kill-after=20s 330 node --import tsx apps/cli/experiment.ts execute "$RUNNER_TEMP/public-manifest.json" "$RUNNER_TEMP/public-session" > "$RUNNER_TEMP/public-stdout.txt" 2> "$RUNNER_TEMP/public-stderr.txt"
+      - name: Preserve only aggregate outcomes, including failures
+        if: always()
+        run: |
+          node --input-type=module <<'NODE'
+          import {existsSync,readFileSync,mkdirSync,writeFileSync} from 'node:fs';import {join} from 'node:path';
+          const temp=process.env.RUNNER_TEMP,read=p=>existsSync(p)?JSON.parse(readFileSync(p,'utf8')):null;
+          const result=read(join(temp,'public-session/result.json')),failure=read(join(temp,'public-session/failure.json')),probe=read(join(temp,'public-probe.json'));
+          let stateOwners=0,nonemptyStates=0,memories=0,acceptedByKind={},runStates=[],errorCodes={},distinctPublicAuthors=0,publicPosts=0,replyLinkedPosts=0;
+          const path=join(temp,'public-session/session.sqlite');
+          if(existsSync(path)){
+            const {default:Database}=await import('better-sqlite3');const db=new Database(path,{readonly:true,fileMustExist:true});
+            try{
+              const states=db.prepare('SELECT entries_json FROM agent_private_states').all();stateOwners=states.length;nonemptyStates=states.filter(s=>JSON.parse(s.entries_json).length>0).length;
+              memories=db.prepare('SELECT COUNT(*) n FROM memories').get().n;
+              runStates=db.prepare('SELECT agent_id AS agentId,kind,state,COUNT(*) AS count FROM runs GROUP BY agent_id,kind,state').all();
+              for(const r of runStates)if(r.state==='DONE')acceptedByKind[r.kind]=(acceptedByKind[r.kind]??0)+r.count;
+              for(const r of db.prepare('SELECT error_code,COUNT(*) n FROM llm_calls WHERE error_code IS NOT NULL GROUP BY error_code').all())errorCodes[r.error_code]=r.n;
+              const posts=db.prepare('SELECT author_id,reply_to FROM messages WHERE author_id IS NOT NULL').all();publicPosts=posts.length;distinctPublicAuthors=new Set(posts.map(p=>p.author_id)).size;replyLinkedPosts=posts.filter(p=>p.reply_to!==null).length;
+            }finally{db.close();}
+          }
+          const modelCalls=result?.modelCalls??0,calledOwners=new Set((result?.usage?.byAgent??[]).map(r=>r.agentId)).size;
+          const report={mode:'real-free-public-provider-application-evaluation',sourceSha:process.env.GITHUB_SHA,provider:'OpenCode Zen public access',model:process.env.MODEL_NAME,modelWeightsIdentity:'NOT_DISCLOSED',endpoint:process.env.MODEL_BASE_URL,
+            probe,execution:result?.status??failure?.status??'NO_EXECUTION_RESULT',failureCode:failure?.code??null,elapsedMs:result?.elapsedMs??null,exitReason:result?.exitReason??null,
+            modelCalls,calledOwners,calls:result?.usage?.calls??[],byAgent:result?.usage?.byAgent??[],publicPosts,distinctPublicAuthors,replyLinkedPosts,stateOwners,nonemptyStates,memories,acceptedByKind,runStates,errorCodes,recordingStatus:result?.recordingStatus??null,
+            endpointResponsive:probe?.httpStatus===200&&probe.nonemptyContent,threeOwnerRequests:calledOwners===3,allThreePublished:distinctPublicAuthors===3,
+            syntheticModel:false,syntheticPersonas:true,privateAccountUsed:false,paidInference:false,publicTranscriptPublished:false,humanReviewed:false,semanticAcceptance:'NOT_EVALUATED',
+            bounds:{probeRequests:1,applicationCalls:24,publicPosts:8,durationMs:240000,maxOutputTokens:1536,maxTokens:3000000}};
+          mkdirSync('artifacts/free-public-evaluation',{recursive:true});writeFileSync('artifacts/free-public-evaluation/result.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report));
+          NODE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: free-public-model-${{ github.run_id }}
+          path: artifacts/free-public-evaluation/result.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Remove only this experiment's private data
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/public-session" "$RUNNER_TEMP/public-manifest.json" "$RUNNER_TEMP/public-stdout.txt" "$RUNNER_TEMP/public-stderr.txt"
