@@ -1,0 +1,125 @@
+name: Explicit alternate engine and longer wait
+on:
+  push:
+    branches: [eval/alternate-engine-long-wait-20260926]
+    paths: [.github/workflows/alternate-engine-long-wait.yml, deploy/request-timing/engine-compare.mjs]
+permissions:
+  contents: read
+concurrency:
+  group: alternate-engine-long-wait
+  cancel-in-progress: false
+jobs:
+  evaluate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [llama-cpp, ollama-long]
+    env:
+      ENGINE: ${{ matrix.engine }}
+      MODEL_NAME: qwen3:4b-instruct-2507-q4_K_M
+      EXPECTED_MANIFEST: 0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0
+      EVIDENCE_PUBLIC_KEY: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAqbTd3tGD+H3xihHsRkmJ
+        MbI3aTtcVwZzVfhBVFXGNyTIc4/P2UiJ5foXBnGoUKg7Pzcww6YJlD7+j+jUUxXC
+        PMAIzg+zMIFrXrPnU7e/0Wva2GtnxuJcOJYFd1qHsyBltpxSVe+jZwY4B6rab4r5
+        +NxdtUzyGARt/mBkMmg/kA+ruZTkYWnlHThL7M5TXk08UZXXb1sifC/jQKGAZVij
+        uXZvQgdwNDMIgp3FcJR0d0ALdUiGQ6WNn0zYc3ql8/kfRDfN8jIlbH/drFgMz4OB
+        Dm6FcLpdvLzsP0TjW3kb4w9qHJpA5B294MQCeHEl5y3Ev45pMKAob4mN6frM5uU7
+        aGe0bto3Ix5WbWdEoCNQh6rQ4thr5dCrrRfUp7EklEbt6G/EKb8rExmw4hb21COl
+        0Hoo9QewQiWCy3tSufCuskTcSClSZ8Og5wPST4MGWi+Cd7BSSp2PZTjJIQPqI8li
+        ix55y6bAUI8g1uoMQz2GqoU3Q5p0fU+nZJrWqvAyZArhAgMBAAE=
+        -----END PUBLIC KEY-----
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - run: npm ci
+      - name: Rebuild the same complete request without changing product code
+        run: node --import tsx deploy/request-timing/prepare.mjs "$RUNNER_TEMP/replay-request.json"
+      - name: Download the exact public model blob without running Ollama
+        if: matrix.engine == 'llama-cpp'
+        run: |
+          python3 - <<'PY'
+          import urllib.request,json,hashlib,os,time
+          root=os.environ['RUNNER_TEMP'];base='https://registry.ollama.ai/v2/library/qwen3/'
+          raw=urllib.request.urlopen(base+'manifests/4b-instruct-2507-q4_K_M',timeout=60).read(4194304)
+          if hashlib.sha256(raw).hexdigest()!=os.environ['EXPECTED_MANIFEST']:raise RuntimeError('MODEL_MANIFEST_CHANGED')
+          manifest=json.loads(raw);layers=[x for x in manifest['layers'] if x['mediaType']=='application/vnd.ollama.image.model']
+          if len(layers)!=1:raise RuntimeError('MODEL_LAYER_COUNT')
+          layer=layers[0];digest=layer['digest'];h=hashlib.sha256();size=0;deadline=time.monotonic()+300
+          with urllib.request.urlopen(base+'blobs/'+digest,timeout=60) as r,open(root+'/model.gguf','xb') as f:
+            while True:
+              b=r.read(4*1024*1024)
+              if not b:break
+              size+=len(b)
+              if size>6*1024**3 or time.monotonic()>deadline:raise RuntimeError('MODEL_DOWNLOAD_BOUND')
+              h.update(b);f.write(b)
+          if 'sha256:'+h.hexdigest()!=digest or size!=layer['size']:raise RuntimeError('MODEL_BLOB_MISMATCH')
+          with open(root+'/model-identity.json','w') as f:json.dump({'manifestSha256':hashlib.sha256(raw).hexdigest(),'modelBlobSha256':h.hexdigest(),'bytes':size,'ollamaRuntimeUsed':False},f)
+          print(json.dumps({'modelBlobSha256':h.hexdigest(),'bytes':size}))
+          PY
+          curl --fail --silent --show-error --location --max-time 120 https://github.com/ggml-org/llama.cpp/releases/download/b10964/llama-b10964-bin-ubuntu-x64.tar.gz -o "$RUNNER_TEMP/llama.tar.gz"
+          echo "9abf88aea48a55d0f80edb1ee20220b186848cca0b4e919d71518cfd7ca67443  $RUNNER_TEMP/llama.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/llama-bin"
+          tar xzf "$RUNNER_TEMP/llama.tar.gz" -C "$RUNNER_TEMP/llama-bin"
+          server=$(find "$RUNNER_TEMP/llama-bin" -type f -name llama-server | head -1)
+          test -n "$server"
+          export LD_LIBRARY_PATH="$(dirname "$server")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          "$server" --version > "$RUNNER_TEMP/engine-version.txt" 2>&1
+          "$server" -m "$RUNNER_TEMP/model.gguf" --alias "$MODEL_NAME" --host 127.0.0.1 --port 18080 -c 49152 -np 1 -t 2 -tb 2 -ngl 0 -fa on -ctk q8_0 -ctv q8_0 --timeout 960 --jinja --chat-template chatml --no-webui --metrics > "$RUNNER_TEMP/engine-private.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/engine.pid"
+          for i in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:18080/health > /dev/null; then break; fi
+            kill -0 "$(cat "$RUNNER_TEMP/engine.pid")"
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:18080/health
+      - name: Start the original Ollama image for the longer-wait comparison
+        if: matrix.engine == 'ollama-long'
+        run: |
+          docker pull ollama/ollama:0.34.4
+          test "$(docker image inspect ollama/ollama:0.34.4 --format '{{.Id}}')" = 'sha256:7fe01b0ef22e342fcbcb61e89d39de511609f078c30754a3a0bee7bb0f20a5c2'
+          docker run -d --name mls-long-model --cpus=4 --memory=10g --cap-drop=ALL --security-opt=no-new-privileges -p 127.0.0.1:11434:11434 -e OLLAMA_NO_CLOUD=1 -e OLLAMA_FLASH_ATTENTION=1 -e OLLAMA_KV_CACHE_TYPE=q8_0 -e OLLAMA_CONTEXT_LENGTH=49152 -e OLLAMA_NUM_PARALLEL=1 -e OLLAMA_MAX_LOADED_MODELS=1 ollama/ollama:0.34.4
+          for i in $(seq 1 60); do if curl --fail --silent http://127.0.0.1:11434/api/version > "$RUNNER_TEMP/engine-version.txt"; then break; fi; sleep 1; done
+          timeout 300 docker exec mls-long-model ollama pull "$MODEL_NAME" > "$RUNNER_TEMP/model-pull.log" 2>&1
+          node --input-type=module <<'NODE'
+          import {writeFileSync} from 'node:fs';import {join} from 'node:path';
+          const m=(await(await fetch('http://127.0.0.1:11434/api/tags')).json()).models.find(m=>m.name===process.env.MODEL_NAME);
+          if(m?.digest!==process.env.EXPECTED_MANIFEST)throw new Error('MODEL_MANIFEST_CHANGED');
+          writeFileSync(join(process.env.RUNNER_TEMP,'model-identity.json'),JSON.stringify(m));
+          const r=await fetch('http://127.0.0.1:11434/api/chat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({model:process.env.MODEL_NAME,messages:[],keep_alive:'20m',options:{num_ctx:49152}}),signal:AbortSignal.timeout(60000)});
+          if(!r.ok)throw new Error('MODEL_LOAD_FAILED');await r.json();
+          NODE
+      - name: Wait up to 900 seconds and test native product integration when a response completes
+        run: node --import tsx deploy/request-timing/engine-compare.mjs
+      - name: Collect non-sensitive identity and environment even when a quota file is absent
+        if: always()
+        run: |
+          mkdir -p artifacts/engine-comparison
+          for name in engine-version.txt model-identity.json; do if test -f "$RUNNER_TEMP/$name"; then cp "$RUNNER_TEMP/$name" artifacts/engine-comparison/; fi; done
+          node --input-type=module <<'NODE'
+          import {existsSync,readFileSync,writeFileSync} from 'node:fs';import {cpus,totalmem} from 'node:os';
+          const optional=p=>existsSync(p)?readFileSync(p,'utf8').trim():null;
+          writeFileSync('artifacts/engine-comparison/environment.json',JSON.stringify({sourceSha:process.env.GITHUB_SHA,engine:process.env.ENGINE,cpuModel:cpus()[0]?.model,cpuCount:cpus().length,totalMemory:totalmem(),cpuMax:optional('/sys/fs/cgroup/cpu.max'),v1Quota:optional('/sys/fs/cgroup/cpu/cpu.cfs_quota_us'),v1Period:optional('/sys/fs/cgroup/cpu/cpu.cfs_period_us'),node:process.version,paidInference:false},null,2));
+          NODE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: engine-comparison-${{ matrix.engine }}-${{ github.run_id }}
+          path: artifacts/engine-comparison/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Clean only the explicitly created test runtime and private temporary data
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/engine.pid"; then kill "$(cat "$RUNNER_TEMP/engine.pid")" || true; fi
+          docker rm -f mls-long-model 2>/dev/null || true
+          rm -rf -- "$RUNNER_TEMP/native-session" "$RUNNER_TEMP/native-manifest.json" "$RUNNER_TEMP/replay-request.json" "$RUNNER_TEMP/engine-private.log" "$RUNNER_TEMP/model.gguf" "$RUNNER_TEMP/llama-bin" "$RUNNER_TEMP/llama.tar.gz" "$RUNNER_TEMP/model-pull.log"
