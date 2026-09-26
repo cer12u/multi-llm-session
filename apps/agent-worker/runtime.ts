@@ -1,3 +1,4 @@
+import { longRequestFetch } from '../../packages/models/long-request.js';
 import { LookupSchema, type Context, type ClaimedRun, type ModelErrorCode, type Usage } from '../../packages/contracts/index.js';
 import { credential } from '../../packages/config/credentials.js';
 import { HttpModel, MockModel, ModelError, parseOutput, type Model } from '../../packages/models/index.js';
@@ -41,7 +42,7 @@ export class WorkerRuntime {
     let callId:string|null=null;
     try {
       if(run.profile.provider!=='mock'&&this.env.ALLOW_LIVE_MODELS!=='1') throw new ModelError('CONFIG_ERROR');
-      const model=this.factory?.(run)??(run.profile.provider==='mock'?new MockModel():new HttpModel(run.profile,credential(run.profile,this.env)));
+      const model=this.factory?.(run)??(run.profile.provider==='mock'?new MockModel():new HttpModel(run.profile,credential(run.profile,this.env),run.timeoutMs>180000?longRequestFetch:fetch));
       let invalid:string|undefined,context=run.context,lookups=0,repaired=false;
       let stage:'primary'|'lookup'|'repair'='primary';
       for(let attempt=0;attempt<4;attempt++) {

@@ -70,7 +70,7 @@ export const SettingsSchema = z.object({
   memoryShareEvery: z.number().int().min(1).max(32).default(3),
   memoryFlushMs: z.number().int().min(100).max(86400000).default(60000),
   memoryEvery: z.number().int().min(3).max(1000).default(12),
-  requestTimeoutMs: z.number().int().min(1000).max(180000).default(90000),
+  requestTimeoutMs: z.number().int().min(1000).max(900000).default(90000),
   leaseMs: z.number().int().min(5000).max(180000).default(30000),
   maxRetries: z.number().int().min(0).max(5).default(2),
 }).strict().refine(v => v.selfWakeMaxMs >= v.selfWakeMinMs, 'selfWakeMaxMs must not be smaller').refine(v => !v.selfWakeEnabled || v.selfWakeMaxMs < v.maxDurationMs, 'Autonomous wakes must fit inside the execution budget; disable selfWakeEnabled for shorter experiments');
@@ -145,7 +145,7 @@ export type PublicMessage = {
   characterId: string | null; characterVersion: number | null; text: string; act: string;
   replyTo: string | null; addressedTo: string[]; deleted: boolean; episode: number; createdAt: number;
 };
-export type PublicAgent = { id: string; slot: string; characterId: string; characterVersion: number; name: string;
+export type PublicAgent = { id: string; slot: string; characterId: Slug, characterVersion: number; name: string;
   presentationRef: string | null; profileId: string; enabled: boolean; status: string; workerOnline: boolean; lastSeenAt: number | null; nextRetryAt: number | null };
 export type PublicSession = { id: string; title: string; lifecycle: Lifecycle; activity: Activity; revision: number;
   epoch: number; createdAt: number; startedAt: number | null; stopReason: string | null;
