@@ -1,7 +1,7 @@
 import { longRequestFetch } from '../../packages/models/long-request.js';
 import { LookupSchema, type Context, type ClaimedRun, type ModelErrorCode, type Usage } from '../../packages/contracts/index.js';
 import { credential } from '../../packages/config/credentials.js';
-import { HttpModel, MockModel, ModelError, parseOutput, type Model } from '../../packages/models/index.js';
+import { HttpModel, MockModel, ModelError, parseModelOutput, parseOutput, type Model } from '../../packages/models/index.js';
 
 export class CoreError extends Error {
   constructor(readonly status:number,readonly code:string) { super(code); }
@@ -54,7 +54,7 @@ export class WorkerRuntime {
         const result=await model.complete(run.kind,context,{signal:AbortSignal.any([combined,AbortSignal.timeout(run.timeoutMs)]),maxChars:run.contextChars,...invalid?{repair:invalid}:{}});
         await this.retryResult(base+'/calls/'+callId,{token:run.token,usage:result.usage,error:null});callId=null;
         let parsed:unknown;
-        try {parsed=parseOutput(run.kind,result.text,run.profile.jsonMode==='schema'&&run.profile.provider!=='mock');}
+        try {parsed=run.profile.provider==='mock'?parseOutput(run.kind,result.text,false):parseModelOutput(run.kind,result.text,context,run.profile.jsonMode==='schema');}
         catch(e) {if(!repaired){repaired=true;invalid=result.text.slice(0,2000);stage='repair';continue;}throw e;}
         const lookup=LookupSchema.safeParse(parsed);
         if(lookup.success) {
