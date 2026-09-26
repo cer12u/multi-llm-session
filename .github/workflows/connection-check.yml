@@ -1,0 +1,46 @@
+name: Connection smoke
+
+on:
+  push:
+    branches:
+      - main
+      - chore/verify-github-connection
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connection-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  connection-smoke:
+    name: Repository and Node.js smoke tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Run connection smoke tests
+        run: node --test tests/connection-smoke.test.mjs
+      - name: Record verification scope
+        if: always()
+        run: |
+          {
+            echo '## Connection smoke test'
+            echo ''
+            echo 'This workflow verifies repository checkout and execution of committed Node.js tests.'
+            echo 'It does not implement or validate the multi-agent conversation application.'
+            echo 'No LLM APIs, repository writes, or application secrets are used by this workflow.'
+          } >> "$GITHUB_STEP_SUMMARY"
