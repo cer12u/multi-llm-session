@@ -12,10 +12,22 @@ jobs:
   real-model:
     if: github.repository == 'cer12u/multi-llm-session'
     runs-on: ubuntu-24.04
-    timeout-minutes: 16
+    timeout-minutes: 13
     env:
-      MODEL_NAME: qwen3:4b-instruct-2507-q4_K_M
+      MODEL_NAME: granite3.3:2b
       MODEL_IMAGE: ollama/ollama:0.34.4
+      EVIDENCE_PUBLIC_KEY: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAt0SL1iEB3g+45sabDmpO
+        +k5ZO3z2G/c2QCLUpLoCUDVtciaCCNg+O32cuY5/eAGqThtXBjjP4cutCvbbEeVa
+        n46ad+CghbtbsgtN2jRM10hkQ4oGgPfQ5kjY5oLyZon2OSwfiGcun0dQZsBbBq0E
+        upIqLheAZ56Sq3dRfYGMZVYxYuH8HYLLSZJ4eCqzxo6bZXJKP07aUXnjgOrE0aZ0
+        yWFjrXiYnoL9UVUV2ulb9xjlZIa941HMAOSEFGzgMzy4cCgBFkwPaK+DKrghMB9s
+        qRDNnXvZWeMEObHlkjARX1pXS9Z/S5UUqup2xlgCqItRUyEHIZZSewcAchFO7V3n
+        jayhgfz/oPgiYybPeZCnO480gx/3ioL60A8Wb0RH/0bOm/H8N0jAtxCr1qEL4B19
+        AVzhYTvNddhaXon7s0lZVEYHW0Nv36hVDCIyegsFxuV5UckhGPLysWu75Hdt5253
+        23m7W+q6heOSK/Om8JosLaZlRLEnmZCNYWGhMWUhvEpDAgMBAAE=
+        -----END PUBLIC KEY-----
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -54,58 +66,70 @@ jobs:
           node --input-type=module <<'NODE'
           import {writeFileSync} from 'node:fs';import {join} from 'node:path';
           const names=['ソラ','ナギ','リン'],traits=['気になる点を具体的に考える。','実用性と使いやすさを重視する。','楽しい工夫や雰囲気を考える。'];
-          const m={schemaVersion:1,approvedCommit:process.env.GITHUB_SHA,evidenceMode:'live',purpose:'smoke',scenario:'free-local-reading-room-json-q8',
+          const m={schemaVersion:1,approvedCommit:process.env.GITHUB_SHA,evidenceMode:'live',purpose:'smoke',scenario:'free-local-granite-reading-room',
             initialText:'架空の小さな読書室を作るなら、どんな場所にしたい？静かに読む人と、感想を少し話したい人の両方が過ごせるといいと思う。',
-            profiles:[{id:'qwen-local',provider:'ollama',model:process.env.MODEL_NAME,baseUrl:'http://127.0.0.1:11434/api',allowLocalHttp:true,authRequired:false,jsonMode:'json',maxOutputTokens:1024,temperature:0.6,maxConcurrent:1,contextWindowTokens:49152}],
-            characters:names.map((name,i)=>({schemaVersion:1,id:'local-'+i,version:1,name,persona:traits[i]+'日本語で自然に短く話す。他者の発言を読み、必要なら意見を変える。話す必要がなければ沈黙する。',presentationRef:null})),
-            participants:names.map((_,i)=>({slot:'worker-'+i,profileId:'qwen-local',characterId:'local-'+i})),
-            bounds:{maxCalls:18,maxPosts:6,durationMs:360000,maxOutputTokens:1024,maxTokens:2000000},quietStopMs:10000,
-            settings:{selfWakeEnabled:false,idleMs:60000,requestTimeoutMs:180000,leaseMs:180000,maxRetries:0,memoryEvery:3,memoryFlushMs:30000,memoryShareEvery:3,contextMessages:8,contextChars:24000,contextTokens:49152,debounceMs:0,directedDebounceMs:0,maxCoalesceMs:0}};
+            profiles:[{id:'granite-local',provider:'ollama',model:process.env.MODEL_NAME,baseUrl:'http://127.0.0.1:11434/api',allowLocalHttp:true,authRequired:false,jsonMode:'json',maxOutputTokens:512,temperature:0.4,maxConcurrent:1,contextWindowTokens:49152}],
+            characters:names.map((name,i)=>({schemaVersion:1,id:'local-'+i,version:1,name,persona:traits[i]+'日本語で自然に短く話す。他者の発言を読み、必要なら意見を変える。話す必要がなければ沈黙する。作業状態の更新は必要な差分だけを簡潔に残す。',presentationRef:null})),
+            participants:names.map((_,i)=>({slot:'worker-'+i,profileId:'granite-local',characterId:'local-'+i})),
+            bounds:{maxCalls:18,maxPosts:6,durationMs:240000,maxOutputTokens:512,maxTokens:2000000},quietStopMs:10000,
+            settings:{selfWakeEnabled:false,idleMs:60000,requestTimeoutMs:90000,leaseMs:120000,maxRetries:0,memoryEvery:3,memoryFlushMs:15000,memoryShareEvery:3,contextMessages:8,contextChars:24000,contextTokens:49152,debounceMs:0,directedDebounceMs:0,maxCoalesceMs:0}};
           writeFileSync(join(process.env.RUNNER_TEMP,'real-manifest.json'),JSON.stringify(m),{flag:'wx',mode:0o600});
           NODE
           node --import tsx apps/cli/experiment.ts preflight "$RUNNER_TEMP/real-manifest.json"
-          timeout --signal=TERM --kill-after=20s 480 node --import tsx apps/cli/experiment.ts execute "$RUNNER_TEMP/real-manifest.json" "$RUNNER_TEMP/real-session" > "$RUNNER_TEMP/real-stdout.txt" 2> "$RUNNER_TEMP/real-stderr.txt"
-      - name: Capture safe model process health without logging model text
+          timeout --signal=TERM --kill-after=20s 330 node --import tsx apps/cli/experiment.ts execute "$RUNNER_TEMP/real-manifest.json" "$RUNNER_TEMP/real-session" > "$RUNNER_TEMP/real-stdout.txt" 2> "$RUNNER_TEMP/real-stderr.txt"
+      - name: Capture safe model process health
         if: always()
         run: |
           docker inspect mls-real-model --format '{{json .State}}' > "$RUNNER_TEMP/model-state.json" || true
           docker stats mls-real-model --no-stream --format '{{json .}}' > "$RUNNER_TEMP/model-resources.json" || true
-      - name: Extract aggregate evidence including rejected and timed-out work
+      - name: Save aggregate results and recipient-encrypted dialogue, never plaintext private evidence
         if: always()
         run: |
           node --input-type=module <<'NODE'
           import {readFileSync,existsSync,mkdirSync,writeFileSync} from 'node:fs';import {join} from 'node:path';
+          import {randomBytes,createCipheriv,publicEncrypt} from 'node:crypto';
           const temp=process.env.RUNNER_TEMP,read=p=>{if(!existsSync(p))return null;try{return JSON.parse(readFileSync(p,'utf8'));}catch{return null;}};
           const result=read(join(temp,'real-session/result.json')),failure=read(join(temp,'real-session/failure.json')),warmup=read(join(temp,'warmup.json'));
           const tags=read(join(temp,'ollama-tags.json')),version=read(join(temp,'ollama-version.json')),model=tags?.models?.find(m=>m.name===process.env.MODEL_NAME);
-          let stateOwners=0,nonemptyStates=0,memories=0,acceptedByKind={},runStates=[],errorCodes={},authors=0,botPosts=0,replyLinkedPosts=0;
+          let stateOwners=0,nonemptyStates=0,memories=0,acceptedByKind={},runStates=[],errorCodes={},traceCodes={},authors=0,botPosts=0,replyLinkedPosts=0,privateEvidence=null;
           const dbPath=join(temp,'real-session/session.sqlite');
           if(existsSync(dbPath)){
             const {default:Database}=await import('better-sqlite3');const db=new Database(dbPath,{readonly:true,fileMustExist:true});
             try{
-              const states=db.prepare('SELECT entries_json FROM agent_private_states').all();stateOwners=states.length;nonemptyStates=states.filter(s=>JSON.parse(s.entries_json).length>0).length;
-              memories=db.prepare('SELECT COUNT(*) n FROM memories').get().n;
-              runStates=db.prepare('SELECT agent_id AS agentId,kind,state,COUNT(*) AS count FROM runs GROUP BY agent_id,kind,state').all();
+              const states=db.prepare('SELECT agent_id,version,entries_json FROM agent_private_states').all();stateOwners=states.length;nonemptyStates=states.filter(s=>JSON.parse(s.entries_json).length>0).length;
+              const notes=db.prepare('SELECT id,agent_id,text,sources_json FROM memories').all();memories=notes.length;
+              runStates=db.prepare("SELECT agent_id AS agentId,kind,state,json_extract(result_json,'$.code') AS code,COUNT(*) AS count FROM runs GROUP BY agent_id,kind,state,code").all();
               for(const r of runStates)if(r.state==='DONE')acceptedByKind[r.kind]=(acceptedByKind[r.kind]??0)+r.count;
               for(const r of db.prepare('SELECT error_code,COUNT(*) n FROM llm_calls WHERE error_code IS NOT NULL GROUP BY error_code').all())errorCodes[r.error_code]=r.n;
-              const posts=db.prepare('SELECT author_id,reply_to FROM messages WHERE author_id IS NOT NULL').all();botPosts=posts.length;authors=new Set(posts.map(r=>r.author_id)).size;replyLinkedPosts=posts.filter(p=>p.reply_to!==null).length;
+              for(const r of db.prepare('SELECT code,COUNT(*) n FROM traces GROUP BY code').all())traceCodes[r.code]=r.n;
+              const messages=db.prepare('SELECT id,sequence,author_id,text,reply_to,created_at FROM messages ORDER BY sequence').all(),posts=messages.filter(m=>m.author_id!==null);botPosts=posts.length;authors=new Set(posts.map(p=>p.author_id)).size;replyLinkedPosts=posts.filter(p=>p.reply_to!==null).length;
+              const participants=db.prepare('SELECT id,slot,character_json FROM agent_instances').all().map(p=>({id:p.id,slot:p.slot,name:JSON.parse(p.character_json).name}));
+              privateEvidence={sourceSha:process.env.GITHUB_SHA,runId:process.env.GITHUB_RUN_ID,model:process.env.MODEL_NAME,configHash:result?.configHash??null,participants,messages,states,memories:notes,result};
             }finally{db.close();}
           }
-          const report={mode:'real-local-model-application-evaluation',sourceSha:process.env.GITHUB_SHA,model:process.env.MODEL_NAME,modelDigest:model?.digest??null,ollamaVersion:version?.version??null,
+          const report={mode:'real-local-model-application-evaluation',sourceSha:process.env.GITHUB_SHA,configHash:result?.configHash??null,model:process.env.MODEL_NAME,modelDigest:model?.digest??null,ollamaVersion:version?.version??null,
             imageId:existsSync(join(temp,'ollama-image-id.txt'))?readFileSync(join(temp,'ollama-image-id.txt'),'utf8').trim():null,
             configuration:{kvCache:'q8_0',flashAttention:true,contextLength:49152,jsonMode:'json',maxConcurrent:1},warmup,modelProcess:read(join(temp,'model-state.json')),modelResources:read(join(temp,'model-resources.json')),
             externalInferenceRequests:0,paidInference:false,syntheticModel:false,syntheticPersonas:true,
             execution:result?.status??failure?.status??'NO_EXECUTION_RESULT',failureCode:failure?.code??null,elapsedMs:result?.elapsedMs??null,exitReason:result?.exitReason??null,
             modelCalls:result?.modelCalls??0,calledOwners:new Set((result?.usage?.byAgent??[]).map(r=>r.agentId)).size,calls:result?.usage?.calls??[],byAgent:result?.usage?.byAgent??[],publicPosts:botPosts,distinctPublicAuthors:authors,replyLinkedPosts,
-            stateOwners,nonemptyStates,memories,acceptedByKind,runStates,errorCodes,recordingStatus:result?.recordingStatus??null,
-            semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,privateTranscriptPublished:false,bounds:{warmupRequests:1,maxCalls:18,maxPosts:6,durationMs:360000,maxOutputTokens:1024,maxTokens:2000000}};
-          mkdirSync('artifacts/free-local-evaluation',{recursive:true});writeFileSync('artifacts/free-local-evaluation/result.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report));
+            stateOwners,nonemptyStates,memories,acceptedByKind,runStates,errorCodes,traceCodes,recordingStatus:result?.recordingStatus??null,
+            semanticAcceptance:'NOT_EVALUATED',humanReviewed:false,plaintextPrivateTranscriptPublished:false,encryptedEvidence:privateEvidence!==null,bounds:{warmupRequests:1,maxCalls:18,maxPosts:6,durationMs:240000,maxOutputTokens:512,maxTokens:2000000}};
+          const out='artifacts/free-local-evaluation';mkdirSync(out,{recursive:true});
+          if(privateEvidence){
+            const key=randomBytes(32),nonce=randomBytes(12),aad=Buffer.from(process.env.GITHUB_RUN_ID+':'+process.env.GITHUB_SHA);
+            const cipher=createCipheriv('aes-256-gcm',key,nonce);cipher.setAAD(aad);
+            const encrypted=Buffer.concat([cipher.update(JSON.stringify(privateEvidence),'utf8'),cipher.final()]);
+            const envelope={formatVersion:1,algorithm:'RSA-OAEP-SHA256+AES-256-GCM',wrappedKey:publicEncrypt({key:process.env.EVIDENCE_PUBLIC_KEY,oaepHash:'sha256'},key).toString('base64'),nonce:nonce.toString('base64'),aad:aad.toString('base64'),tag:cipher.getAuthTag().toString('base64'),ciphertext:encrypted.toString('base64')};
+            writeFileSync(join(out,'private-evidence.enc.json'),JSON.stringify(envelope));
+          }
+          writeFileSync(join(out,'result.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
           NODE
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: free-local-model-${{ github.run_id }}
-          path: artifacts/free-local-evaluation/result.json
+          path: artifacts/free-local-evaluation/
           retention-days: 7
           if-no-files-found: error
       - name: Remove only this run's model container and private evidence
