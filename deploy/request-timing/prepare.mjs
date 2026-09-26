@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import {readFileSync,writeFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {execFileSync} from 'node:child_process';
+import {modelRequest} from '../../packages/models/index.ts';
+import {ModelProfileSchema} from '../../packages/contracts/index.ts';
+const originalMain='237f87e207e61dae4e973ce279896bf4e14bd738';
+assert.equal(execFileSync('git',['rev-parse','HEAD:packages/models/index.ts'],{encoding:'utf8'}).trim(),'cbb3097eedc9709f200504606962e87824905aaf');
+execFileSync('git',['diff','--exit-code',originalMain,'HEAD','--','apps','packages','package.json','package-lock.json']);
+const context=JSON.parse(readFileSync(new URL('./initial-context.json',import.meta.url),'utf8'));
+assert.equal(context.self.privateState.entries.length,0);assert.equal(context.memories.length,0);
+const profile=ModelProfileSchema.parse({id:'granite-local',provider:'ollama',model:'granite3.3:2b',baseUrl:'http://127.0.0.1:11434/api',allowLocalHttp:true,authRequired:false,jsonMode:'json',maxOutputTokens:512,temperature:0.4,maxConcurrent:1,contextWindowTokens:49152});
+const body=modelRequest(profile,'decide',context,{maxChars:24000}),text=JSON.stringify(body),digest=createHash('sha256').update(text).digest('hex');
+assert.equal(digest,'6c361ceb1d22ad77389bde08cb5dcdd18b09b33df890c9907e67154f00f804ae','Replay differs from the saved initial request');
+writeFileSync(process.argv[2],text,{flag:'wx',mode:0o600});
+console.log(JSON.stringify({originalMain,requestBytes:Buffer.byteLength(text),sha256:digest,syntheticInitialState:true,liveGeneratedMemories:0}));

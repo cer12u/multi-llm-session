@@ -1,0 +1,84 @@
+name: Explicit request timing isolation retry
+on:
+  push:
+    branches: [eval/request-timing-retry-20260926]
+    paths: ['.github/workflows/request-timing-retry.yml', 'deploy/request-timing/**']
+permissions:
+  contents: read
+concurrency:
+  group: request-timing-isolation
+  cancel-in-progress: false
+jobs:
+  timing:
+    if: github.repository == 'cer12u/multi-llm-session'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 17
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - label: granite-2b
+            model: granite3.3:2b
+            digest: 07bd1f170855240f9e162bf54ea494a8bc1c73d8cbd1365d7fccbeb7d2504947
+          - label: qwen-4b
+            model: qwen3:4b-instruct-2507-q4_K_M
+            digest: 0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0
+    env:
+      MODEL_NAME: ${{ matrix.model }}
+      EXPECTED_MODEL_DIGEST: ${{ matrix.digest }}
+      MODEL_IMAGE: ollama/ollama:0.34.4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - run: npm ci
+      - name: Reproduce the identical saved input with the unchanged application builder
+        run: node --import tsx deploy/request-timing/prepare.mjs "$RUNNER_TEMP/replay-request.json"
+      - name: Load the same model bytes into an isolated CPU server
+        run: |
+          docker pull "$MODEL_IMAGE"
+          test "$(docker image inspect "$MODEL_IMAGE" --format '{{.Id}}')" = 'sha256:7fe01b0ef22e342fcbcb61e89d39de511609f078c30754a3a0bee7bb0f20a5c2'
+          docker run -d --name mls-timing-model --cpus=4 --memory=10g --cap-drop=ALL --security-opt=no-new-privileges -p 127.0.0.1:11434:11434 -e OLLAMA_NO_CLOUD=1 -e OLLAMA_FLASH_ATTENTION=1 -e OLLAMA_KV_CACHE_TYPE=q8_0 -e OLLAMA_CONTEXT_LENGTH=49152 -e OLLAMA_NUM_PARALLEL=1 -e OLLAMA_MAX_LOADED_MODELS=1 -e OLLAMA_KEEP_ALIVE=5m "$MODEL_IMAGE"
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:11434/api/version >/dev/null; then break; fi
+            sleep 1
+          done
+          timeout 240 docker exec mls-timing-model ollama pull "$MODEL_NAME" > "$RUNNER_TEMP/model-pull.log" 2>&1
+          node --input-type=module <<'NODE'
+          const r=await fetch('http://127.0.0.1:11434/api/tags');if(!r.ok)throw new Error('MODEL_LIST_FAILED');
+          const model=(await r.json()).models.find(m=>m.name===process.env.MODEL_NAME);
+          if(model?.digest!==process.env.EXPECTED_MODEL_DIGEST)throw new Error('MODEL_DIGEST_CHANGED');
+          console.log(JSON.stringify({model:model.name,digest:model.digest,size:model.size}));
+          NODE
+      - name: Measure cold prefill, full streaming, and full non-streaming independently
+        run: |
+          timeout --signal=TERM --kill-after=10s 690 node --import tsx deploy/request-timing/replay.mjs --request "$RUNNER_TEMP/replay-request.json" --models "$MODEL_NAME" --context 49152 --out "$RUNNER_TEMP/private-timing" --validator packages/models/index.ts --timeout-ms 180000 --total-ms 660000 --execute --dedicated-server
+      - name: Collect aggregate results only
+        if: always()
+        run: |
+          mkdir -p artifacts/request-timing
+          if test -f "$RUNNER_TEMP/private-timing/result.json"; then cp "$RUNNER_TEMP/private-timing/result.json" artifacts/request-timing/result.json; fi
+          docker inspect mls-timing-model --format '{{json .State}}' > artifacts/request-timing/model-state.json || true
+          docker stats mls-timing-model --no-stream --format '{{json .}}' > artifacts/request-timing/model-resources.json || true
+          node --input-type=module <<'NODE'
+          import {writeFileSync,readFileSync} from 'node:fs';import {cpus,totalmem} from 'node:os';
+          writeFileSync('artifacts/request-timing/environment.json',JSON.stringify({sourceSha:process.env.GITHUB_SHA,model:process.env.MODEL_NAME,node:process.version,cpuModel:cpus()[0]?.model,cpuCount:cpus().length,totalMemory:totalmem(),cpuQuota:readFileSync('/sys/fs/cgroup/cpu.max','utf8').trim(),paidInference:false,modelCallsUpperBound:3,applicationE2E:false},null,2));
+          NODE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: request-timing-${{ matrix.label }}-${{ github.run_id }}
+          path: artifacts/request-timing/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Remove this experiment's model container and private temporary data
+        if: always()
+        run: |
+          docker rm -f mls-timing-model || true
+          rm -rf -- "$RUNNER_TEMP/private-timing" "$RUNNER_TEMP/replay-request.json" "$RUNNER_TEMP/model-pull.log"
