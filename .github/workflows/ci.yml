@@ -43,6 +43,8 @@ jobs:
       - name: Three, five and eight independent worker processes
         id: lab
         run: node deploy/ci-check.mjs lab
+      - name: Long model response, renewable lease and pause fencing E2E
+        run: timeout --signal=TERM --kill-after=15s 450 node deploy/long-request-e2e.mjs
       - name: Install the locked Chromium browser
         id: browser
         run: node deploy/ci-check.mjs browser

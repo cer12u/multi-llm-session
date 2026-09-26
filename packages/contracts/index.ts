@@ -70,7 +70,7 @@ export const SettingsSchema = z.object({
   memoryShareEvery: z.number().int().min(1).max(32).default(3),
   memoryFlushMs: z.number().int().min(100).max(86400000).default(60000),
   memoryEvery: z.number().int().min(3).max(1000).default(12),
-  requestTimeoutMs: z.number().int().min(1000).max(180000).default(90000),
+  requestTimeoutMs: z.number().int().min(1000).max(900000).default(90000),
   leaseMs: z.number().int().min(5000).max(180000).default(30000),
   maxRetries: z.number().int().min(0).max(5).default(2),
 }).strict().refine(v => v.selfWakeMaxMs >= v.selfWakeMinMs, 'selfWakeMaxMs must not be smaller').refine(v => !v.selfWakeEnabled || v.selfWakeMaxMs < v.maxDurationMs, 'Autonomous wakes must fit inside the execution budget; disable selfWakeEnabled for shorter experiments');
