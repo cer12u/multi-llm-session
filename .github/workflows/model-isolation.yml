@@ -1,0 +1,84 @@
+name: Explicit model-size and latency diagnosis
+on:
+  push:
+    branches: [diag/model-size-latency-20260926]
+    paths: ['diagnostics/model-isolation.mjs', '.github/workflows/model-isolation.yml']
+permissions:
+  contents: read
+concurrency:
+  group: model-size-latency-diagnosis
+  cancel-in-progress: false
+jobs:
+  isolate:
+    if: github.repository == 'cer12u/multi-llm-session'
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - label: granite-2b
+            model: granite3.3:2b
+          - label: qwen25-3b
+            model: qwen2.5:3b-instruct-q4_K_M
+          - label: qwen25-7b
+            model: qwen2.5:7b-instruct-q4_K_M
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    env:
+      MODEL_NAME: ${{ matrix.model }}
+      MODEL_IMAGE: ollama/ollama:0.34.4
+      EVIDENCE_PUBLIC_KEY: |
+        -----BEGIN PUBLIC KEY-----
+        MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAhYhBHyRXnSu9hT5Al5H6
+        +pmc/LlWDNSJKc40GbfMy7eiFPkBIQ8Q+x0B6pZR0svDZu7ioy/vs3RM2qbJMhd1
+        3UC1z8o1sNUN7lzmKCc8nDAK9ynwDVrYdUVHvTSxIDx8EoKx4Yg5+ECFrRw0kAXm
+        NTjtCfBxQA1R6bkMwTLV9L4BzwspbmAPyOatKNMFGmncq6N4DIMbyEd/9PS4cGRa
+        9CayDcVELO2KZ0SAe9eCrGhQztDTRY/L7fiPMAKlFPnF+vK5eXuwQpjxM6vRauTe
+        svVGKsz7NWqgQDmY/V40Z3kcgByfJU9tReGdaIwyiH6cyfIEik+v/Oe2oqk6u+6T
+        ttDPqWOZfGtDvoDQPk8APjYDzhxalkR9NxdARLrkM82FoVInUhqb0DdW7cEGIi/M
+        pYmK34Ofpb87yA8M8ZyP2OsXKhJx895qHUR2KaybmfWO6pPrhWBVAioNbaJlmsOk
+        1maZODhA17G79+uTemvGAxdPO0PzdXs8pVtuP8wD1IYtAgMBAAE=
+        -----END PUBLIC KEY-----
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - run: npm ci
+      - name: Prepare only the selected local model
+        run: |
+          docker pull "$MODEL_IMAGE"
+          docker run -d --name mls-isolation --cpus=4 --memory=10g --cap-drop=ALL --security-opt=no-new-privileges -p 127.0.0.1:11434:11434 -e OLLAMA_NO_CLOUD=1 -e OLLAMA_FLASH_ATTENTION=1 -e OLLAMA_KV_CACHE_TYPE=q8_0 -e OLLAMA_CONTEXT_LENGTH=49152 -e OLLAMA_NUM_PARALLEL=1 -e OLLAMA_MAX_LOADED_MODELS=1 -e OLLAMA_KEEP_ALIVE=15m "$MODEL_IMAGE"
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:11434/api/version; then break; fi
+            sleep 1
+          done
+          timeout 240 docker exec mls-isolation ollama pull "$MODEL_NAME"
+      - name: Measure real production input without changing application code
+        env:
+          DIAG_ROOT: ${{ runner.temp }}/mls-isolation-private
+          ALLOW_LIVE_MODELS: '1'
+        run: timeout --signal=TERM --kill-after=10s 660 node --import tsx diagnostics/model-isolation.mjs
+      - name: Capture bounded model health metadata
+        if: always()
+        run: |
+          mkdir -p artifacts/model-isolation
+          docker inspect mls-isolation --format '{{json .State}}' > artifacts/model-isolation/container-state.json || true
+          docker stats mls-isolation --no-stream --format '{{json .}}' > artifacts/model-isolation/resources.json || true
+          curl --max-time 5 --silent http://127.0.0.1:11434/api/ps > artifacts/model-isolation/loaded-model.json || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: model-isolation-${{ matrix.label }}-${{ github.run_id }}
+          path: artifacts/model-isolation/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Remove this isolated model and private working data
+        if: always()
+        run: |
+          docker rm -f mls-isolation || true
+          rm -rf -- "$RUNNER_TEMP/mls-isolation-private"
