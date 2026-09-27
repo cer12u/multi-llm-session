@@ -164,7 +164,7 @@ export function projectModelContext(context:Context):unknown{
   const index=aliases(context);
   const message=(m:PublicMessage)=>projectMessage(m,index);
   return {
-    self:{ref:'self',name:context.self.character.name,persona:context.self.character.persona,state:projectState(context,index)},
+    self:{ref:'self',state:projectState(context,index)},
     participants:context.participants.map(p=>({ref:index.agentById.get(p.id),name:p.name,status:p.status,enabled:p.enabled})),
     trigger:context.trigger,historyTruncated:context.historyTruncated,
     messages:context.messages.map(message),delta:context.delta.map(message),

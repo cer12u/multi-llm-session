@@ -20,7 +20,7 @@ const server=createServer((request,response)=>{void(async()=>{
   let raw='';for await(const chunk of request){raw+=String(chunk);if(raw.length>1048576)throw new Error('SYNTHETIC_REQUEST_TOO_LARGE');}
   const input=JSON.parse(raw),system=input.messages.find((m:{role:string})=>m.role==='system')?.content;
   const context=JSON.parse(input.messages.find((m:{role:string})=>m.role==='user').content);
-  if(input.model!==profile.model||context.self.name!==character||!system.includes('synthetic persona '+character))throw new Error('SYNTHETIC_IDENTITY_MISMATCH');
+  if(input.model!==profile.model||context.self.ref!=='self'||!system.includes('synthetic persona '+character))throw new Error('SYNTHETIC_IDENTITY_MISMATCH');
   if(/agentId|sessionId|expectedVersion|observationId/.test(raw))throw new Error('SYNTHETIC_BINDING_LEAK');
   calls++;
   writeFileSync('/tmp/provider-proof.json',JSON.stringify({calls,uid:process.getuid?.(),model:profile.model,profileId:profile.id,profileVersion:profile.version,characterId:character,characterVersion:2,agentRef:context.self.ref,modelContract:'semantic-handles-v1',authenticationMatched:true,personaMatched:true,path}),{mode:0o600});
