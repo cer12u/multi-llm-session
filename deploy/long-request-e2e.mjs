@@ -11,18 +11,21 @@ import {startCluster} from '../dist/apps/cli/cluster.js';
 import {SettingsSchema} from '../dist/packages/contracts/index.js';
 import {defaultCharacters} from '../dist/packages/config/index.js';
 const root=mkdtempSync(join(tmpdir(),'mls-long-e2e-')),delay=ms=>new Promise(r=>setTimeout(r,ms));
-let cluster,id,phase='delayed',calls=0,firstAt=0,slowDelivered=false,held,release;
+let cluster,id,phase='delayed',calls=0,firstAt=0,slowDelivered=false,held,release,wireMetrics=null;
 const headers={};
 const server=createServer(async(req,res)=>{
  try{
   const chunks=[];for await(const chunk of req)chunks.push(chunk);
   const body=JSON.parse(Buffer.concat(chunks)),c=JSON.parse(body.messages.find(m=>m.role==='user').content);
   assert.equal(body.response_format.type,'json_schema');calls++;
-  const s=c.self.privateState;
-  const result={action:{decision:phase==='hold'?'SPEAK':'ABSTAIN',...(phase==='hold'?{intent:{act:'comment',intent:'obsolete proposal',replyTo:c.messages.at(-1).id,addressedTo:[]}}:{reason:'synthetic listen'})},
-   statePatch:{agentId:s.agentId,sessionId:s.sessionId,expectedVersion:s.version,observationId:c.observation.id,upsert:[{id:'long-e2e',kind:'interest',text:phase==='hold'?'MUST_NOT_SURVIVE_PAUSE':'retained after long HTTP wait',evidence:[],resume:null}],remove:[]}};
+  const userText=body.messages.find(m=>m.role==='user').content,schemaText=JSON.stringify(body.response_format.json_schema.schema);
+  assert.equal(c.self.privateState,undefined);assert.equal(c.self.id,undefined);
+  for(const forbidden of ['agentId','sessionId','expectedVersion','observationId','sourceMessageIds','throughInput']){assert(!userText.includes(forbidden),'MODEL_CONTEXT_LEAK_'+forbidden);assert(!schemaText.includes('"'+forbidden+'"'),'MODEL_SCHEMA_PROTOCOL_'+forbidden);}
+  wireMetrics??={requestBytes:Buffer.byteLength(JSON.stringify(body)),userBytes:Buffer.byteLength(userText),schemaBytes:Buffer.byteLength(schemaText),selfRef:c.self.ref,participantRefs:c.participants.map(p=>p.ref),messageRefs:c.messages.map(m=>m.ref)};
+  const result={action:{decision:phase==='hold'?'SPEAK':'ABSTAIN',...(phase==='hold'?{intent:{act:'comment',intent:'obsolete proposal',replyTo:c.messages.at(-1).ref,addressedTo:[]}}:{reason:'synthetic listen'})},
+   stateDelta:{upsert:[{id:'long-e2e',kind:'interest',text:phase==='hold'?'MUST_NOT_SURVIVE_PAUSE':'retained after long HTTP wait',evidence:[],resume:null}],remove:[]}};
   if(phase==='delayed'&&calls===1){firstAt=Date.now();await delay(310000);slowDelivered=true;}
-  if(phase==='hold'){held={owner:s.agentId,at:Date.now()};await new Promise(resolve=>{release=resolve;});}
+  if(phase==='hold'){held={owner:c.self.ref,at:Date.now()};await new Promise(resolve=>{release=resolve;});}
   res.writeHead(200,{'content-type':'application/json','content-encoding':'gzip'});
   res.end(gzipSync(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify({result})}}],usage:{prompt_tokens:12,completion_tokens:8}})));
  }catch(error){if(!res.headersSent)res.writeHead(500);res.end();console.error('Synthetic provider failed:',error.message);}
@@ -61,6 +64,6 @@ try{
  const callsAtPause=calls;await delay(2000);assert.equal(calls,callsAtPause);
  phase='normal';await api(prefix+'/resume',{});await until(async()=>{const s=await api(prefix+'/snapshot');return s.session.lifecycle==='RUNNING';});
  await api(prefix+'/end',{});assert.deepEqual(stateRows().map(s=>s.entries_json),before.map(s=>s.entries_json));
- const summary={mode:'actual-core-three-workers-http-sqlite',slowResponseMs:310000,observedAcceptanceMs:longElapsed,requestTimeoutMs:900000,leaseMs:5000,threeOwnersAccepted:true,delayedHeadersBeyond300s:true,gzipDecoded:true,privateStateRetained:true,pauseFencedLateResult:true,noPostAfterPause:true,noNewCallWhilePaused:true,resumePreservedState:true,paidInference:false};
+ const summary={mode:'actual-core-three-workers-http-sqlite',slowResponseMs:310000,observedAcceptanceMs:longElapsed,requestTimeoutMs:900000,leaseMs:5000,threeOwnersAccepted:true,delayedHeadersBeyond300s:true,gzipDecoded:true,privateStateRetained:true,pauseFencedLateResult:true,noPostAfterPause:true,noNewCallWhilePaused:true,resumePreservedState:true,semanticWire:true,transactionBindingsExcluded:true,wireMetrics,paidInference:false};
  mkdirSync('artifacts',{recursive:true});writeFileSync('artifacts/long-request-e2e.json',JSON.stringify(summary,null,2));console.log(JSON.stringify(summary));
 }finally{release?.();await cluster?.stop();server.closeAllConnections();await new Promise(r=>server.close(r));rmSync(root,{recursive:true,force:true});}
