@@ -15,7 +15,7 @@ it('routes three workers through three actual local HTTP endpoints with separate
       const server=createServer(async(req,res)=>{
         let raw='';for await(const chunk of req)raw+=String(chunk);const body=JSON.parse(raw);
         received.push({model:body.model,authorization:req.headers.authorization,system:body.messages[0].content,path:req.url});
-        const content=JSON.stringify({decision:'ABSTAIN',reason:'実HTTP配送だけの合成試験'});
+        const content=JSON.stringify({lookup:[],action:{decision:'ABSTAIN',reason:'実HTTP配送だけの合成試験',text:null,act:null,intent:null,reply:null,to:[],defer:null,afterMs:null,waitFor:null},state:null});
         res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(i===0?{message:{content}}:{choices:[{message:{content}}]}));
       });
       servers.push(server);await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));const address=server.address();if(!address||typeof address==='string')throw new Error('port');

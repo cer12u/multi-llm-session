@@ -28,8 +28,8 @@ const server=createServer((request,response)=>{void(async()=>{
   if(fault){response.writeHead(429,{'retry-after':'60'});response.end('{"error":"synthetic rate limit"}');return;}
   const source=context.messages.find((m:{deleted:boolean})=>!m.deleted);
   const semantic=context.delivery?.purpose==='memory'
-    ?{action:{notes:source?[{text:'synthetic retained note for '+character,sourceMessages:[source.ref]}]:[],changes:[]},state:null}
-    :{action:{decision:'ABSTAIN',reason:'synthetic HTTP acceptance'},state:null};
+    ?{action:{notes:source?[{text:'synthetic retained note for '+character,sources:[source.ref]}]:[],changes:[]},state:null}
+    :{lookup:[],action:{decision:'ABSTAIN',reason:'synthetic HTTP acceptance',text:null,act:null,intent:null,reply:null,to:[],defer:null,afterMs:null,waitFor:null},state:null};
   const content=JSON.stringify(profile.jsonMode==='schema'?{result:semantic}:semantic);
   response.end(JSON.stringify(profile.provider==='ollama'?{message:{content},done:true,done_reason:'stop',prompt_eval_count:20,eval_count:10}:{choices:[{finish_reason:'stop',message:{content}}],usage:{prompt_tokens:20,completion_tokens:10}}));
 })().catch(()=>{response.statusCode=500;response.end('{"error":"synthetic fixture assertion failed"}');});});

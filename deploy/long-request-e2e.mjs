@@ -23,9 +23,11 @@ const server=createServer(async(req,res)=>{
   assert.equal(uuid.test(wire),false,'model contract must use request-local handles instead of UUIDs');
   assert.match(c.self.ref,/^self$/);assert.match(c.messages.at(-1).ref,/^m\d+$/);
   const evidence=c.messages.at(-1).ref;
-  const action={decision:phase==='hold'?'SPEAK':'ABSTAIN',...(phase==='hold'?{intent:{act:'comment',intent:'obsolete proposal',replyTo:evidence,addressedTo:[]}}:{reason:'synthetic listen'})};
-  const result={action,state:{upsert:[{id:'long-e2e',kind:'interest',text:phase==='hold'?'MUST_NOT_SURVIVE_PAUSE':'retained after long HTTP wait',
-    evidence:[evidence],derivedFrom:[],question:null,participation:null,resume:null}],remove:[]}};
+  const action=phase==='hold'
+    ?{decision:'SPEAK',reason:null,text:null,act:'comment',intent:'obsolete proposal',reply:evidence,to:[],defer:null,afterMs:null,waitFor:null}
+    :{decision:'ABSTAIN',reason:'synthetic listen',text:null,act:null,intent:null,reply:null,to:[],defer:null,afterMs:null,waitFor:null};
+  const result={lookup:[],action,state:{upsert:[{id:'long-e2e',kind:'interest',text:phase==='hold'?'MUST_NOT_SURVIVE_PAUSE':'retained after long HTTP wait',
+    evidence:[evidence],memories:[],question:null,participation:null,resume:null}],remove:[]}};
   if(phase==='delayed'&&calls===1){firstAt=Date.now();await delay(310000);slowDelivered=true;}
   if(phase==='hold'){held={owner:c.self.ref,at:Date.now()};await new Promise(resolve=>{release=resolve;});}
   res.writeHead(200,{'content-type':'application/json','content-encoding':'gzip'});
