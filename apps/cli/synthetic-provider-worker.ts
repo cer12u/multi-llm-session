@@ -26,8 +26,6 @@ const server=createServer((request,response)=>{void(async()=>{
   writeFileSync('/tmp/provider-proof.json',JSON.stringify({calls,uid:process.getuid?.(),model:profile.model,profileId:profile.id,profileVersion:profile.version,characterId:character,characterVersion:2,agentRef:context.self.ref,modelContract:'semantic-handles-v1',authenticationMatched:true,personaMatched:true,path}),{mode:0o600});
   response.setHeader('content-type','application/json');
   if(fault){response.writeHead(429,{'retry-after':'60'});response.end('{"error":"synthetic rate limit"}');return;}
-  response.setHeader('content-type','application/json');
-  if(fault){response.writeHead(429,{'retry-after':'60'});response.end('{"error":"synthetic rate limit"}');return;}
   const source=context.messages.find((m:{deleted:boolean})=>!m.deleted);
   const semantic=context.delivery?.purpose==='memory'
     ?{action:{notes:source?[{text:'synthetic retained note for '+character,sourceMessages:[source.ref]}]:[],changes:[]},state:null}
