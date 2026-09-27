@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import {
-  WireOutputSchemas, type Context, type RunKind, type PublicMessage, type MemoryNote, type SourceChunk,
+  WireOutputSchemas, type Context, type RunKind, type PublicMessage, type MemoryNote,
 } from '../contracts/index.js';
+import type { SourceChunk } from '../contracts/source.js';
 
 const EntryId=z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/);
 const AgentRef=z.string().regex(/^(?:self|a\d+)$/);
@@ -10,82 +11,69 @@ const SourceRef=z.string().regex(/^s\d+$/);
 const MemoryRef=z.string().regex(/^r\d+$/);
 const EvidenceRef=z.string().regex(/^(?:m|s)\d+$/);
 const Act=z.enum(['answer','question','comment','agreement','joke','correction','topic']);
+const Decision=z.enum(['SPEAK','ABSTAIN','DEFER','DRAFT','DROP','KEEP','REWRITE']);
+const DeferKind=z.enum(['time','new_message','answer_from']);
+const ResumeKind=z.enum(['new_message','answer_from','time','related_topic']);
 
-const ModelIntent=z.object({
-  act:Act,intent:z.string().trim().min(1).max(500),replyTo:MessageRef.nullable(),addressedTo:z.array(AgentRef).max(16),
+const NullableShort=z.string().max(500).nullable();
+const ModelAction=z.object({
+  decision:Decision,
+  reason:z.string().max(160).nullable(),
+  text:z.string().trim().min(1).max(8000).nullable(),
+  act:Act.nullable(),
+  intent:z.string().trim().min(1).max(500).nullable(),
+  reply:MessageRef.nullable(),
+  to:z.array(AgentRef).max(16),
+  defer:DeferKind.nullable(),
+  afterMs:z.number().int().min(100).max(300000).nullable(),
+  waitFor:AgentRef.nullable(),
 }).strict();
-const ModelDefer=z.discriminatedUnion('kind',[
-  z.object({kind:z.literal('time'),afterMs:z.number().int().min(100).max(300000)}).strict(),
-  z.object({kind:z.literal('new_message')}).strict(),
-  z.object({kind:z.literal('answer_from'),agent:AgentRef}).strict(),
-]);
-const ModelDecision=z.discriminatedUnion('decision',[
-  z.object({decision:z.literal('SPEAK'),intent:ModelIntent}).strict(),
-  z.object({decision:z.literal('DEFER'),reason:z.string().max(160),defer:ModelDefer}).strict(),
-  z.object({decision:z.literal('ABSTAIN'),reason:z.string().max(160)}).strict(),
-]);
-const ModelDraft=z.discriminatedUnion('decision',[
-  z.object({decision:z.literal('DRAFT'),text:z.string().trim().min(1).max(8000)}).strict(),
-  z.object({decision:z.literal('DROP'),reason:z.string().max(160)}).strict(),
-]);
-const ModelReview=z.discriminatedUnion('decision',[
-  z.object({decision:z.literal('KEEP')}).strict(),
-  z.object({decision:z.literal('REWRITE'),text:z.string().trim().min(1).max(8000),intent:ModelIntent}).strict(),
-  z.object({decision:z.literal('DEFER'),reason:z.string().max(160),defer:ModelDefer}).strict(),
-  z.object({decision:z.literal('DROP'),reason:z.string().max(160)}).strict(),
-]);
-const ModelObserve=z.object({decision:z.literal('ABSTAIN'),reason:z.string().max(160)}).strict();
 
-const ModelResume=z.discriminatedUnion('kind',[
-  z.object({kind:z.literal('new_message')}).strict(),
-  z.object({kind:z.literal('answer_from'),agent:AgentRef}).strict(),
-  z.object({kind:z.literal('time'),afterMs:z.number().int().min(100).max(86400000)}).strict(),
-  z.object({kind:z.literal('related_topic'),topic:z.string().trim().min(1).max(120)}).strict(),
-]);
+const ModelResume=z.object({
+  kind:ResumeKind,agent:AgentRef.nullable(),afterMs:z.number().int().min(100).max(86400000).nullable(),
+  topic:z.string().trim().min(1).max(120).nullable(),
+}).strict();
 const ModelQuestion=z.object({
   message:MessageRef,status:z.enum(['open','partial','awaiting_confirmation','resolved','deferred']),
-  addressing:z.enum(['explicit','inferred','unknown']),addressedTo:z.array(AgentRef).max(16),
+  addressing:z.enum(['explicit','inferred','unknown']),agents:z.array(AgentRef).max(16),
   replies:z.array(MessageRef).max(7),topics:z.array(z.string().trim().min(1).max(80)).min(1).max(4),
 }).strict();
-const ModelParticipation=z.object({code:z.enum(['SATISFIED','CONTENT_LOOP'])}).strict();
 const ModelStateEntry=z.object({
   id:EntryId,kind:z.enum(['understanding','interest','question','intention']),text:z.string().trim().min(1).max(500),
-  evidence:z.array(EvidenceRef).max(8),derivedFrom:z.array(MemoryRef).max(8),
-  question:ModelQuestion.nullable(),participation:ModelParticipation.nullable(),resume:ModelResume.nullable(),
+  evidence:z.array(EvidenceRef).max(8),memories:z.array(MemoryRef).max(8),
+  resume:ModelResume.nullable(),question:ModelQuestion.nullable(),
+  participation:z.enum(['SATISFIED','CONTENT_LOOP']).nullable(),
 }).strict();
-const ModelStateDelta=z.object({upsert:z.array(ModelStateEntry).max(8),remove:z.array(EntryId).max(16)}).strict();
+const ModelState=z.object({upsert:z.array(ModelStateEntry).max(8),remove:z.array(EntryId).max(16)}).strict();
+
+const ModelLookup=z.object({
+  kind:z.enum(['messages','memories','message','source']),
+  query:z.string().trim().min(1).max(200).nullable(),
+  ref:z.string().regex(/^(?:m|s)\d+$/).nullable(),
+  cursor:z.string().max(2048).nullable(),
+}).strict();
 
 const Time=z.number().int().nonnegative().nullable();
-const ModelMemoryMeaning=z.object({
-  subject:z.union([z.literal('human'),AgentRef]),topic:z.string().trim().min(1).max(120),
-  key:z.string().trim().min(1).max(160),value:z.string().trim().min(1).max(240),
-  epistemic:z.enum(['self_report','hearsay','inference','uncertain']),validFrom:Time,validTo:Time,
-  aliases:z.array(z.string().trim().min(1).max(80)).max(8),
-}).strict().refine(x=>x.validFrom===null||x.validTo===null||x.validTo>x.validFrom,'Validity interval must increase');
 const ModelMemoryChange=z.object({
-  operation:z.enum(['add','merge','correct','conflict']),text:z.string().trim().min(1).max(1000),
-  sourceMessages:z.array(MessageRef).min(1).max(8),meaning:ModelMemoryMeaning,
+  operation:z.enum(['add','merge','correct','conflict']),
+  text:z.string().trim().min(1).max(1000),
+  sources:z.array(MessageRef).min(1).max(8),
+  subject:z.union([z.literal('human'),AgentRef]),
+  topic:z.string().trim().min(1).max(120),
+  key:z.string().trim().min(1).max(160),
+  value:z.string().trim().min(1).max(240),
+  epistemic:z.enum(['self_report','hearsay','inference','uncertain']),
+  validFrom:Time,validTo:Time,aliases:z.array(z.string().trim().min(1).max(80)).max(8),
   targets:z.array(MemoryRef).max(8),parents:z.array(MemoryRef).max(8),
-}).strict().refine(x=>x.operation==='add'||x.targets.length>0,'This operation needs an observed target');
-const ModelMemory=z.object({
-  notes:z.array(z.object({text:z.string().trim().min(1).max(1000),sourceMessages:z.array(MessageRef).min(1).max(8)}).strict()).max(4),
-  changes:z.array(ModelMemoryChange).max(4),
-}).strict().refine(x=>x.notes.length+x.changes.length<=4,'At most four memory changes per result');
-
-const stateful=<T extends z.ZodTypeAny>(action:T)=>z.object({action,state:ModelStateDelta.nullable()}).strict();
-const SearchLookup=z.object({kind:z.enum(['messages','memories']),query:z.string().trim().min(1).max(200),cursor:z.string().max(2048).nullable()}).strict();
-const MessageLookup=z.object({kind:z.literal('message'),message:MessageRef}).strict();
-const SourceLookup=z.object({kind:z.literal('source'),source:SourceRef,cursor:z.string().max(2048).nullable()}).strict();
-export const ModelLookupSchema=z.object({
-  decision:z.literal('LOOKUP'),requests:z.array(z.union([SearchLookup,MessageLookup,SourceLookup])).min(1).max(3),
 }).strict();
-export const ModelWireOutputSchemas={
-  observe:z.union([stateful(ModelObserve),ModelLookupSchema]),
-  decide:z.union([stateful(ModelDecision),ModelLookupSchema]),
-  draft:z.union([stateful(ModelDraft),ModelLookupSchema]),
-  review:z.union([stateful(ModelReview),ModelLookupSchema]),
-  memory:stateful(ModelMemory),
-};
+const ModelMemory=z.object({
+  notes:z.array(z.object({text:z.string().trim().min(1).max(1000),sources:z.array(MessageRef).min(1).max(8)}).strict()).max(4),
+  changes:z.array(ModelMemoryChange).max(4),
+}).strict();
+
+const normal=z.object({lookup:z.array(ModelLookup).max(3),action:ModelAction.nullable(),state:ModelState.nullable()}).strict();
+const memory=z.object({action:ModelMemory,state:ModelState.nullable()}).strict();
+export const ModelWireOutputSchemas={observe:normal,decide:normal,draft:normal,review:normal,memory};
 
 type AliasIndex={
   agentById:Map<string,string>;agentByRef:Map<string,string>;
@@ -93,162 +81,153 @@ type AliasIndex={
   sourceById:Map<string,string>;sourceByRef:Map<string,Context['sources'][number]|SourceChunk>;
   memoryById:Map<string,string>;memoryByRef:Map<string,MemoryNote>;
 };
-
-function unique<T extends {id:string}>(values:T[]):T[]{
-  return [...new Map(values.map(value=>[value.id,value])).values()];
-}
+function unique<T extends {id:string}>(values:T[]):T[]{return [...new Map(values.map(value=>[value.id,value])).values()];}
 function aliases(context:Context):AliasIndex{
   const agentById=new Map<string,string>([[context.self.id,'self']]),agentByRef=new Map<string,string>([['self',context.self.id]]);
   let ai=0;
-  for(const participant of context.participants)if(participant.id!==context.self.id&&!agentById.has(participant.id)){
-    const ref='a'+ai++;agentById.set(participant.id,ref);agentByRef.set(ref,participant.id);
-  }
+  for(const p of context.participants)if(p.id!==context.self.id&&!agentById.has(p.id)){const ref='a'+ai++;agentById.set(p.id,ref);agentByRef.set(ref,p.id);}
   const messages=unique([...context.messages,...context.delta,...(context.retrieved??[]).flatMap(r=>r.messages)]);
   const messageById=new Map<string,string>(),messageByRef=new Map<string,PublicMessage>();
-  messages.forEach((message,i)=>{const ref='m'+i;messageById.set(message.id,ref);messageByRef.set(ref,message);});
+  messages.forEach((m,i)=>{const ref='m'+i;messageById.set(m.id,ref);messageByRef.set(ref,m);});
   const sources=unique([...context.sources,...(context.retrieved??[]).flatMap(r=>r.sources??[])]);
   const sourceById=new Map<string,string>(),sourceByRef=new Map<string,Context['sources'][number]|SourceChunk>();
-  sources.forEach((source,i)=>{const ref='s'+i;sourceById.set(source.id,ref);sourceByRef.set(ref,source);});
+  sources.forEach((s,i)=>{const ref='s'+i;sourceById.set(s.id,ref);sourceByRef.set(ref,s);});
   const memories=unique([...context.memories,...(context.retrieved??[]).flatMap(r=>r.memories)]);
   const memoryById=new Map<string,string>(),memoryByRef=new Map<string,MemoryNote>();
-  memories.forEach((memory,i)=>{const ref='r'+i;memoryById.set(memory.id,ref);memoryByRef.set(ref,memory);});
+  memories.forEach((m,i)=>{const ref='r'+i;memoryById.set(m.id,ref);memoryByRef.set(ref,m);});
   return {agentById,agentByRef,messageById,messageByRef,sourceById,sourceByRef,memoryById,memoryByRef};
 }
-const mapped=<T>(value:T|undefined|null):T|null=>value??null;
-
-function projectIntent(intent:Context['candidate'] extends {intent:infer T}|null?T:never,index:AliasIndex){
-  const i=intent as {act:string;intent:string;replyTo:string|null;addressedTo:string[]};
-  return {act:i.act,intent:i.intent,replyTo:i.replyTo?mapped(index.messageById.get(i.replyTo)):null,
-    addressedTo:i.addressedTo.map(id=>index.agentById.get(id)).filter((v):v is string=>!!v)};
+const compact=<T>(values:(T|undefined)[]):T[]=>values.filter((v):v is T=>v!==undefined);
+function projectIntent(intent:any,index:AliasIndex){
+  return {act:intent.act,intent:intent.intent,reply:intent.replyTo?index.messageById.get(intent.replyTo)??null:null,
+    to:compact(intent.addressedTo.map((id:string)=>index.agentById.get(id)))};
 }
-function projectMessage(message:PublicMessage,index:AliasIndex){
-  return {ref:index.messageById.get(message.id),author:message.authorId===null?'human':index.agentById.get(message.authorId)??'other',
-    authorName:message.authorName,text:message.text,act:message.act,replyTo:message.replyTo?mapped(index.messageById.get(message.replyTo)):null,
-    addressedTo:message.addressedTo.map(id=>index.agentById.get(id)).filter((v):v is string=>!!v),deleted:message.deleted,createdAt:message.createdAt};
+function projectMessage(m:PublicMessage,index:AliasIndex){
+  return {ref:index.messageById.get(m.id),author:m.authorId===null?'human':index.agentById.get(m.authorId)??'other',
+    name:m.authorName,text:m.text,act:m.act,reply:m.replyTo?index.messageById.get(m.replyTo)??null:null,
+    to:compact(m.addressedTo.map(id=>index.agentById.get(id))),deleted:m.deleted};
 }
-function projectSource(source:Context['sources'][number]|SourceChunk,index:AliasIndex){
-  return {ref:index.sourceById.get(source.id),title:source.title,text:source.text,url:source.url,publishedAt:source.publishedAt,
-    offset:'offset'in source?source.offset:undefined,totalChars:'totalChars'in source?source.totalChars:undefined,
-    nextCursor:'nextCursor'in source?source.nextCursor:undefined};
+function projectSource(s:Context['sources'][number]|SourceChunk,index:AliasIndex){
+  return {ref:index.sourceById.get(s.id),title:s.title,text:s.text,url:s.url,publishedAt:s.publishedAt,
+    offset:'offset'in s?s.offset:undefined,totalChars:'totalChars'in s?s.totalChars:undefined,nextCursor:'nextCursor'in s?s.nextCursor:undefined};
 }
-function projectMemory(memory:MemoryNote,index:AliasIndex){
-  const meaning=memory.provenance?.meaning;
-  return {ref:index.memoryById.get(memory.id),text:memory.text,
-    sourceMessages:memory.sourceMessageIds.map(id=>index.messageById.get(id)).filter((v):v is string=>!!v),
-    status:memory.provenance?.status??'ACTIVE',
-    meaning:meaning?{subject:meaning.subjectId===null?'human':index.agentById.get(meaning.subjectId)??'other',topic:meaning.topic,key:meaning.key,
-      value:meaning.value,epistemic:meaning.epistemic,validFrom:meaning.validFrom,validTo:meaning.validTo,aliases:meaning.aliases}:null};
+function projectMemory(m:MemoryNote,index:AliasIndex){
+  const meaning=m.provenance?.meaning;
+  return {ref:index.memoryById.get(m.id),text:m.text,sources:compact(m.sourceMessageIds.map(id=>index.messageById.get(id))),
+    status:m.provenance?.status??'ACTIVE',meaning:meaning?{subject:meaning.subjectId===null?'human':index.agentById.get(meaning.subjectId)??'other',
+      topic:meaning.topic,key:meaning.key,value:meaning.value,epistemic:meaning.epistemic,validFrom:meaning.validFrom,validTo:meaning.validTo}:null};
 }
-function projectResume(resume:NonNullable<NonNullable<Context['self']['privateState']>['entries'][number]['resume']>,context:Context,index:AliasIndex){
-  if(resume.kind==='answer_from')return {kind:resume.kind,agent:index.agentById.get(resume.agentId!)??'other'};
-  if(resume.kind==='time')return {kind:resume.kind,afterMs:Math.max(100,(resume.notBefore??context.agenda?.now??0)-(context.agenda?.now??0))};
-  if(resume.kind==='related_topic')return {kind:resume.kind,topic:resume.topic};
-  return {kind:'new_message'};
+function projectResume(r:any,context:Context,index:AliasIndex){
+  return {kind:r.kind,agent:r.agentId?index.agentById.get(r.agentId)??null:null,
+    afterMs:r.kind==='time'?Math.max(100,(r.notBefore??context.agenda?.now??0)-(context.agenda?.now??0)):null,
+    topic:r.kind==='related_topic'?r.topic:null};
 }
 function projectState(context:Context,index:AliasIndex){
-  return (context.self.privateState?.entries??[]).map(entry=>({
-    id:entry.id,kind:entry.kind,text:entry.text,
-    evidence:entry.evidence.map(ref=>ref.kind==='message'?index.messageById.get(ref.id):index.sourceById.get(ref.id)).filter((v):v is string=>!!v),
-    derivedFrom:(entry.derivedFrom??[]).map(id=>index.memoryById.get(id)).filter((v):v is string=>!!v),
-    question:entry.question?{message:index.messageById.get(entry.question.messageId)??null,status:entry.question.status,addressing:entry.question.addressing,
-      addressedTo:entry.question.addressedTo.map(id=>index.agentById.get(id)).filter((v):v is string=>!!v),
-      replies:entry.question.replyIds.map(id=>index.messageById.get(id)).filter((v):v is string=>!!v),topics:entry.question.topics}:null,
-    participation:entry.participation?{code:entry.participation.code}:null,
-    resume:entry.resume?projectResume(entry.resume,context,index):null,
-  }));
+  return (context.self.privateState?.entries??[]).map(e=>({id:e.id,kind:e.kind,text:e.text,
+    evidence:compact(e.evidence.map(ref=>ref.kind==='message'?index.messageById.get(ref.id):index.sourceById.get(ref.id))),
+    memories:compact((e.derivedFrom??[]).map(id=>index.memoryById.get(id))),
+    resume:e.resume?projectResume(e.resume,context,index):null,
+    question:e.question?{message:index.messageById.get(e.question.messageId)??null,status:e.question.status,addressing:e.question.addressing,
+      agents:compact(e.question.addressedTo.map(id=>index.agentById.get(id))),replies:compact(e.question.replyIds.map(id=>index.messageById.get(id))),topics:e.question.topics}:null,
+    participation:e.participation?.code??null}));
 }
 
-/** Model-visible context intentionally omits UUIDs, optimistic-lock versions, observation hashes and profile/session bindings.
- * Short references are scoped to one request and are resolved only by the Worker against the captured Context. */
+/** Request-local semantic projection. Persistent UUIDs and transaction bindings never enter the live model request. */
 export function projectModelContext(context:Context):unknown{
-  const index=aliases(context);
-  const message=(m:PublicMessage)=>projectMessage(m,index);
+  const index=aliases(context),message=(m:PublicMessage)=>projectMessage(m,index);
   return {
     self:{ref:'self',state:projectState(context,index)},
-    participants:context.participants.map(p=>({ref:index.agentById.get(p.id),name:p.name,status:p.status,enabled:p.enabled})),
+    participants:context.participants.map(p=>({ref:index.agentById.get(p.id),name:p.name,status:p.status})),
     trigger:context.trigger,historyTruncated:context.historyTruncated,
     messages:context.messages.map(message),delta:context.delta.map(message),
     sources:context.sources.map(s=>projectSource(s,index)),memories:context.memories.map(m=>projectMemory(m,index)),
-    questions:context.questions.map(q=>({message:index.messageById.get(q.messageId)??null,text:q.text,from:q.from===null?'human':index.agentById.get(q.from)??'other',
-      addressedTo:(q.addressedTo??[]).map(id=>index.agentById.get(id)).filter((v):v is string=>!!v),
-      inferredAddressees:(q.inferredAddressees??[]).map(id=>index.agentById.get(id)).filter((v):v is string=>!!v),
-      addressing:q.addressing,status:q.status,classification:q.classification,topics:q.topics??[],excerpt:q.excerpt??false})),
+    questions:context.questions.map(q=>({message:index.messageById.get(q.messageId)??null,text:q.text,
+      from:q.from===null?'human':index.agentById.get(q.from)??'other',to:compact((q.addressedTo??[]).map(id=>index.agentById.get(id))),
+      inferredTo:compact((q.inferredAddressees??[]).map(id=>index.agentById.get(id)),),addressing:q.addressing,status:q.status,topics:q.topics??[]})),
     candidate:context.candidate?{intent:projectIntent(context.candidate.intent,index),text:context.candidate.text}:null,
     delivery:context.delivery?{purpose:context.delivery.purpose,complete:context.delivery.complete,
       entries:context.delivery.entries.map(e=>({ref:e.kind==='message'?index.messageById.get(e.id):index.sourceById.get(e.id),kind:e.kind,superseded:e.superseded,excerpt:e.excerpt}))}:null,
     progress:context.progress?{observationPending:context.progress.observationPending,memoryPending:context.progress.memoryPending}:null,
     coverage:context.coverage?{complete:context.coverage.complete}:null,
-    agenda:context.agenda?{now:context.agenda.now,minimumIntervalMs:context.agenda.minimumIntervalMs,timeWakeEnabled:context.agenda.timeWakeEnabled,
-      pending:context.agenda.pending.map(p=>({entryId:p.entryId,kind:p.kind,status:p.status,effectiveAt:p.effectiveAt,reason:p.reason})),
-      triggered:context.agenda.triggered.map(p=>({entryId:p.entryId,kind:p.kind,status:p.status,effectiveAt:p.effectiveAt,reason:p.reason}))}:null,
-    conversation:context.conversation?{signals:context.conversation.signals.map(s=>({kind:s.kind,evidence:s.evidence.map(e=>index.messageById.get(e.id)).filter((v):v is string=>!!v)})),
-      recentPurposes:context.conversation.recentPurposes.map(p=>({message:index.messageById.get(p.messageId)??null,act:p.act,purpose:p.purpose,excerpt:p.excerpt})),
-      previousAssessment:context.conversation.previousAssessment}:null,
-    recall:context.recall?{selected:context.recall.selected.map(s=>({memory:index.memoryById.get(s.id)??null,score:s.score,provenance:s.provenance})).filter(s=>s.memory),
-      omittedCount:context.recall.omittedForBudget.length}:null,
-    retrieved:(context.retrieved??[]).map(r=>({request:{kind:r.request.kind,query:r.request.kind==='message'?(index.messageById.get(r.request.query)??'unavailable'):r.request.kind==='source'?(index.sourceById.get(r.request.query)??r.request.query):r.request.query},
-      messages:r.messages.map(message),memories:r.memories.map(m=>projectMemory(m,index)),sources:(r.sources??[]).map(s=>projectSource(s,index)),nextCursor:r.nextCursor})),
+    agenda:context.agenda?{now:context.agenda.now,timeWakeEnabled:context.agenda.timeWakeEnabled,
+      pending:context.agenda.pending.map(p=>({entryId:p.entryId,kind:p.kind,status:p.status,effectiveAt:p.effectiveAt})),
+      triggered:context.agenda.triggered.map(p=>({entryId:p.entryId,kind:p.kind,status:p.status,effectiveAt:p.effectiveAt}))}:null,
+    conversation:context.conversation?{signals:context.conversation.signals.map(s=>({kind:s.kind,evidence:compact(s.evidence.map(e=>index.messageById.get(e.id)))})),
+      recentPurposes:context.conversation.recentPurposes.map(p=>({message:index.messageById.get(p.messageId)??null,act:p.act,purpose:p.purpose}))}:null,
+    retrieved:(context.retrieved??[]).map(r=>({messages:r.messages.map(message),memories:r.memories.map(m=>projectMemory(m,index)),
+      sources:(r.sources??[]).map(s=>projectSource(s,index)),nextCursor:r.nextCursor})),
   };
 }
 
 function required<T>(value:T|undefined,label:string):T{if(value===undefined)throw new Error('UNKNOWN_MODEL_REF:'+label);return value;}
-function bindAgent(ref:string,index:AliasIndex){return required(index.agentByRef.get(ref),ref);}
-function bindMessage(ref:string,index:AliasIndex){return required(index.messageByRef.get(ref),ref);}
-function bindMemory(ref:string,index:AliasIndex){return required(index.memoryByRef.get(ref),ref);}
-function bindSource(ref:string,index:AliasIndex){return required(index.sourceByRef.get(ref),ref);}
+const bindAgent=(ref:string,i:AliasIndex)=>required(i.agentByRef.get(ref),ref);
+const bindMessage=(ref:string,i:AliasIndex)=>required(i.messageByRef.get(ref),ref);
+const bindMemory=(ref:string,i:AliasIndex)=>required(i.memoryByRef.get(ref),ref);
+const bindSource=(ref:string,i:AliasIndex)=>required(i.sourceByRef.get(ref),ref);
 function bindEvidence(ref:string,index:AliasIndex){
   if(ref.startsWith('m')){const m=bindMessage(ref,index);return {kind:'message' as const,id:m.id,version:m.revision};}
   const s=bindSource(ref,index);return {kind:'source' as const,id:s.id,version:s.version??s.fetchedAt};
 }
-function bindIntent(intent:any,index:AliasIndex){
-  return {act:intent.act,intent:intent.intent,replyTo:intent.replyTo?bindMessage(intent.replyTo,index).id:null,
-    addressedTo:intent.addressedTo.map((ref:string)=>bindAgent(ref,index))};
+function bindIntent(a:any,index:AliasIndex){return {act:a.act,intent:a.intent,replyTo:a.reply?bindMessage(a.reply,index).id:null,addressedTo:a.to.map((r:string)=>bindAgent(r,index))};}
+function bindDefer(a:any,index:AliasIndex){
+  if(a.defer==='answer_from'){if(!a.waitFor)throw new Error('DEFER_AGENT_REQUIRED');return {kind:'answer_from',afterMs:100,agentId:bindAgent(a.waitFor,index)};}
+  if(a.defer==='time'){if(a.afterMs===null)throw new Error('DEFER_TIME_REQUIRED');return {kind:'time',afterMs:a.afterMs,agentId:null};}
+  if(a.defer==='new_message')return {kind:'new_message',afterMs:100,agentId:null};
+  throw new Error('DEFER_KIND_REQUIRED');
 }
-function bindDefer(defer:any,index:AliasIndex){
-  if(defer.kind==='answer_from')return {kind:defer.kind,afterMs:100,agentId:bindAgent(defer.agent,index)};
-  return {kind:defer.kind,afterMs:defer.kind==='time'?defer.afterMs:100,agentId:null};
-}
-function bindResume(resume:any,context:Context,index:AliasIndex){
-  if(resume.kind==='answer_from')return {kind:resume.kind,agentId:bindAgent(resume.agent,index),notBefore:null,topic:null};
-  if(resume.kind==='time'){
-    if(!context.agenda)throw new Error('MODEL_TIME_WITHOUT_AGENDA');
-    return {kind:resume.kind,agentId:null,notBefore:context.agenda.now+resume.afterMs,topic:null};
+function bindAction(kind:RunKind,a:any,index:AliasIndex){
+  const reject=(condition:boolean)=>{if(condition)throw new Error('MODEL_ACTION_FIELDS_INVALID');};
+  if(kind==='observe'){reject(a.decision!=='ABSTAIN'||!a.reason);return {decision:'ABSTAIN',reason:a.reason};}
+  if(kind==='decide'){
+    if(a.decision==='SPEAK'){reject(!a.act||!a.intent||a.reason!==null||a.defer!==null);return {decision:'SPEAK',intent:bindIntent(a,index)};}
+    if(a.decision==='DEFER'){reject(!a.reason);return {decision:'DEFER',reason:a.reason,defer:bindDefer(a,index)};}
+    reject(a.decision!=='ABSTAIN'||!a.reason);return {decision:'ABSTAIN',reason:a.reason};
   }
-  if(resume.kind==='related_topic')return {kind:resume.kind,agentId:null,notBefore:null,topic:resume.topic};
+  if(kind==='draft'){
+    if(a.decision==='DRAFT'){reject(!a.text);return {decision:'DRAFT',text:a.text};}
+    reject(a.decision!=='DROP'||!a.reason);return {decision:'DROP',reason:a.reason};
+  }
+  if(kind==='review'){
+    if(a.decision==='KEEP')return {decision:'KEEP'};
+    if(a.decision==='REWRITE'){reject(!a.text||!a.act||!a.intent);return {decision:'REWRITE',text:a.text,intent:bindIntent(a,index)};}
+    if(a.decision==='DEFER'){reject(!a.reason);return {decision:'DEFER',reason:a.reason,defer:bindDefer(a,index)};}
+    reject(a.decision!=='DROP'||!a.reason);return {decision:'DROP',reason:a.reason};
+  }
+  throw new Error('MEMORY_ACTION_SEPARATE');
+}
+function bindResume(r:any,context:Context,index:AliasIndex){
+  if(r.kind==='answer_from'){if(!r.agent)throw new Error('RESUME_AGENT_REQUIRED');return {kind:r.kind,agentId:bindAgent(r.agent,index),notBefore:null,topic:null};}
+  if(r.kind==='time'){if(r.afterMs===null||!context.agenda)throw new Error('RESUME_TIME_REQUIRED');return {kind:r.kind,agentId:null,notBefore:context.agenda.now+r.afterMs,topic:null};}
+  if(r.kind==='related_topic'){if(!r.topic)throw new Error('RESUME_TOPIC_REQUIRED');return {kind:r.kind,agentId:null,notBefore:null,topic:r.topic};}
   return {kind:'new_message',agentId:null,notBefore:null,topic:null};
 }
 function bindState(state:any,context:Context,index:AliasIndex){
   if(state===null)return null;
-  const current=context.self.privateState,observation=context.observation;
-  if(!current||!observation)throw new Error('MODEL_STATE_WITHOUT_BINDING');
+  const current=context.self.privateState,observation=context.observation;if(!current||!observation)throw new Error('MODEL_STATE_WITHOUT_BINDING');
   return {agentId:context.self.id,sessionId:current.sessionId,expectedVersion:current.version,observationId:observation.id,
-    upsert:state.upsert.map((entry:any)=>({
-      id:entry.id,kind:entry.kind,text:entry.text,evidence:entry.evidence.map((ref:string)=>bindEvidence(ref,index)),
-      derivedFrom:entry.derivedFrom.map((ref:string)=>bindMemory(ref,index).id),
-      question:entry.question?{messageId:bindMessage(entry.question.message,index).id,status:entry.question.status,addressing:entry.question.addressing,
-        addressedTo:entry.question.addressedTo.map((ref:string)=>bindAgent(ref,index)),replyIds:entry.question.replies.map((ref:string)=>bindMessage(ref,index).id),topics:entry.question.topics}:undefined,
-      participation:entry.participation?{code:entry.participation.code,throughInput:required(context.delivery?.throughInput,'delivery')}:undefined,
-      resume:entry.resume?bindResume(entry.resume,context,index):null,
-    })),remove:state.remove};
+    upsert:state.upsert.map((e:any)=>({id:e.id,kind:e.kind,text:e.text,evidence:e.evidence.map((r:string)=>bindEvidence(r,index)),
+      derivedFrom:e.memories.map((r:string)=>bindMemory(r,index).id),
+      question:e.question?{messageId:bindMessage(e.question.message,index).id,status:e.question.status,addressing:e.question.addressing,
+        addressedTo:e.question.agents.map((r:string)=>bindAgent(r,index)),replyIds:e.question.replies.map((r:string)=>bindMessage(r,index).id),topics:e.question.topics}:undefined,
+      participation:e.participation?{code:e.participation,throughInput:required(context.delivery?.throughInput,'delivery')}:undefined,
+      resume:e.resume?bindResume(e.resume,context,index):null})),remove:state.remove};
 }
-function bindAction(kind:RunKind,action:any,index:AliasIndex){
-  if(kind==='decide'){
-    if(action.decision==='SPEAK')return {...action,intent:bindIntent(action.intent,index)};
-    if(action.decision==='DEFER')return {...action,defer:bindDefer(action.defer,index)};
-  }
-  if(kind==='review'){
-    if(action.decision==='REWRITE')return {...action,intent:bindIntent(action.intent,index)};
-    if(action.decision==='DEFER')return {...action,defer:bindDefer(action.defer,index)};
-  }
-  return action;
+function bindMemoryAction(a:any,index:AliasIndex){
+  if(a.notes.length+a.changes.length>4)throw new Error('MEMORY_CHANGE_LIMIT');
+  return {notes:a.notes.map((n:any)=>({text:n.text,sourceMessageIds:n.sources.map((r:string)=>bindMessage(r,index).id)})),
+    changes:a.changes.map((c:any)=>{
+      if(c.validFrom!==null&&c.validTo!==null&&c.validTo<=c.validFrom)throw new Error('MEMORY_INTERVAL_INVALID');
+      if(c.operation!=='add'&&!c.targets.length)throw new Error('MEMORY_TARGET_REQUIRED');
+      return {operation:c.operation,text:c.text,sourceMessageIds:c.sources.map((r:string)=>bindMessage(r,index).id),
+        meaning:{subjectId:c.subject==='human'?null:bindAgent(c.subject,index),topic:c.topic,key:c.key,value:c.value,epistemic:c.epistemic,
+          validFrom:c.validFrom,validTo:c.validTo,aliases:c.aliases},
+        targets:c.targets.map((r:string)=>bindMemory(r,index).id),parents:c.parents.map((r:string)=>bindMemory(r,index).id)};})};
 }
-function bindMemoryAction(action:any,index:AliasIndex){
-  return {notes:action.notes.map((note:any)=>({text:note.text,sourceMessageIds:note.sourceMessages.map((ref:string)=>bindMessage(ref,index).id)})),
-    changes:action.changes.map((change:any)=>({operation:change.operation,text:change.text,
-      sourceMessageIds:change.sourceMessages.map((ref:string)=>bindMessage(ref,index).id),
-      meaning:{subjectId:change.meaning.subject==='human'?null:bindAgent(change.meaning.subject,index),topic:change.meaning.topic,key:change.meaning.key,
-        value:change.meaning.value,epistemic:change.meaning.epistemic,validFrom:change.meaning.validFrom,validTo:change.meaning.validTo,aliases:change.meaning.aliases},
-      targets:change.targets.map((ref:string)=>bindMemory(ref,index).id),parents:change.parents.map((ref:string)=>bindMemory(ref,index).id)}))};
+function bindLookup(request:any,index:AliasIndex){
+  if(request.kind==='message'){if(!request.ref?.startsWith('m'))throw new Error('LOOKUP_MESSAGE_REF_REQUIRED');return {kind:'message',query:bindMessage(request.ref,index).id,cursor:null};}
+  if(request.kind==='source'){if(!request.ref?.startsWith('s'))throw new Error('LOOKUP_SOURCE_REF_REQUIRED');return {kind:'source',query:bindSource(request.ref,index).id,cursor:request.cursor};}
+  if(!request.query)throw new Error('LOOKUP_QUERY_REQUIRED');
+  return {kind:request.kind,query:request.query,cursor:request.cursor};
 }
 
 export function parseModelOutput(kind:RunKind,value:string,wrapped=false):unknown{
@@ -257,19 +236,13 @@ export function parseModelOutput(kind:RunKind,value:string,wrapped=false):unknow
   const data=JSON.parse(text) as {result?:unknown};
   return ModelWireOutputSchemas[kind].parse(wrapped?data.result:data);
 }
-
-/** Convert semantic model output into the exact internal transaction contract.
- * Every security/concurrency binding is taken from the captured Context, never trusted from the model. */
 export function bindModelOutput(kind:RunKind,parsed:unknown,context:Context):unknown{
   const index=aliases(context),value=parsed as any;
-  if(value?.decision==='LOOKUP'){
-    const requests=value.requests.map((request:any)=>{
-      if(request.kind==='message')return {kind:'message',query:bindMessage(request.message,index).id,cursor:null};
-      if(request.kind==='source')return {kind:'source',query:bindSource(request.source,index).id,cursor:request.cursor};
-      return request;
-    });
-    return WireOutputSchemas[kind].parse({decision:'LOOKUP',requests});
+  if(kind!=='memory'&&value.lookup.length){
+    if(value.action!==null||value.state!==null)throw new Error('LOOKUP_MUST_BE_EXCLUSIVE');
+    return WireOutputSchemas[kind].parse({decision:'LOOKUP',requests:value.lookup.map((r:any)=>bindLookup(r,index))});
   }
+  if(kind!=='memory'&&value.action===null)throw new Error('MODEL_ACTION_REQUIRED');
   const action=kind==='memory'?bindMemoryAction(value.action,index):bindAction(kind,value.action,index);
   return WireOutputSchemas[kind].parse({action,statePatch:bindState(value.state,context,index)});
 }
