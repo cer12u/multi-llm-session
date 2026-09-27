@@ -50,6 +50,14 @@ const ModelStateEntrySchema=z.object({
   resume:ModelResumeSchema.nullable(),
 }).strict();
 const ModelStateDeltaSchema=z.object({upsert:z.array(ModelStateEntrySchema).max(8),remove:z.array(EntryId).max(16)}).strict();
+const SearchQuery=z.string().trim().min(1).max(200), Cursor=z.string().max(2048).nullable().default(null);
+const ModelLookupRequestSchema=z.discriminatedUnion('kind',[
+  z.object({kind:z.literal('messages'),query:SearchQuery,cursor:Cursor}).strict(),
+  z.object({kind:z.literal('memories'),query:SearchQuery,cursor:Cursor}).strict(),
+  z.object({kind:z.literal('message'),query:MessageRef,cursor:Cursor}).strict(),
+  z.object({kind:z.literal('source'),query:SourceRef,cursor:Cursor}).strict(),
+]);
+const ModelLookupSchema=z.object({decision:z.literal('LOOKUP'),requests:z.array(ModelLookupRequestSchema).min(1).max(3)}).strict();
 const Stateful=<T extends z.ZodTypeAny>(action:T)=>z.object({action,stateDelta:ModelStateDeltaSchema.nullable()}).strict();
 const ModelMemoryMeaningSchema=z.object({
   subject:ParticipantRef.nullable(),topic:z.string().trim().min(1).max(120),key:z.string().trim().min(1).max(160),value:z.string().trim().min(1).max(240),
@@ -65,10 +73,10 @@ const ModelMemorySchema=z.object({
 }).strict().refine(x=>x.notes.length+(x.changes?.length??0)<=4,'At most four memory changes per result');
 
 export const ModelWireOutputSchemas={
-  observe:z.union([Stateful(ModelObserveSchema),LookupSchema]),
-  decide:z.union([Stateful(ModelDecisionSchema),LookupSchema]),
-  draft:z.union([Stateful(ModelDraftSchema),LookupSchema]),
-  review:z.union([Stateful(ModelReviewSchema),LookupSchema]),
+  observe:z.union([Stateful(ModelObserveSchema),ModelLookupSchema]),
+  decide:z.union([Stateful(ModelDecisionSchema),ModelLookupSchema]),
+  draft:z.union([Stateful(ModelDraftSchema),ModelLookupSchema]),
+  review:z.union([Stateful(ModelReviewSchema),ModelLookupSchema]),
   memory:Stateful(ModelMemorySchema),
 };
 
@@ -102,21 +110,21 @@ function modelEntry(entry:any,map:ModelRefMap,now:number){
 export function modelContext(c:Context):Record<string,unknown>{
   const map=refs(c),p=(id:string|null)=>id?map.participantById.get(id)??null:null,m=(id:string|null)=>id?map.messageById.get(id)??null:null;
   const message=(x:any)=>({ref:need(map.messageById.get(x.id)),author:p(x.authorId),authorName:x.authorName,text:x.text,act:x.act,replyTo:m(x.replyTo),addressedTo:x.addressedTo.map((id:string)=>need(map.participantById.get(id))),deleted:x.deleted});
-  const source=(x:any)=>({ref:need(map.sourceById.get(x.id)),title:x.title,text:x.text,url:x.url,publishedAt:x.publishedAt,excerpt:x.nextCursor!==null});
+  const source=(x:any)=>({ref:need(map.sourceById.get(x.id)),title:x.title,text:x.text,url:x.url,publishedAt:x.publishedAt,excerpt:x.nextCursor!==null,nextCursor:x.nextCursor??null});
   const memory=(x:any)=>({ref:need(map.memoryById.get(x.id)),text:x.text,sources:x.sourceMessageIds.map((id:string)=>map.messageById.get(id)).filter(Boolean),provenance:x.provenance?{status:x.provenance.status,verified:false}:undefined});
   const now=c.agenda?.now??Date.now();
   return {
     self:{ref:map.participantById.get(c.self.id)??null,name:c.self.character.name,persona:c.self.character.persona,state:(c.self.privateState?.entries??[]).map(e=>modelEntry(e,map,now))},
     participants:c.participants.map(x=>({ref:need(map.participantById.get(x.id)),name:x.name,enabled:x.enabled,status:x.status})),
     trigger:c.trigger,historyTruncated:c.historyTruncated,messages:c.messages.map(message),delta:c.delta.map(message),sources:c.sources.map(source),memories:c.memories.map(memory),
-    candidate:c.candidate?{text:c.candidate.text,intent:modelIntent(c.candidate.intent,map),reviewedRevision:c.candidate.reviewedRevision}:null,
+    candidate:c.candidate?{text:c.candidate.text,intent:modelIntent(c.candidate.intent,map)}:null,
     questions:c.questions.map(q=>({message:map.messageById.get(q.messageId)??null,text:q.text,from:p(q.from),addressedTo:(q.addressedTo??[]).map(id=>map.participantById.get(id)).filter(Boolean),status:q.status??'unassessed',topics:q.topics??[],excerpt:q.excerpt??false})),
     delivery:c.delivery?{purpose:c.delivery.purpose,complete:c.delivery.complete,entries:c.delivery.entries.map(e=>({ref:e.kind==='message'?map.messageById.get(e.id):map.sourceById.get(e.id),kind:e.kind,superseded:e.superseded,excerpt:e.excerpt}))}:undefined,
     progress:c.progress?{observationPending:c.progress.observationPending,memoryPending:c.progress.memoryPending}:undefined,
     coverage:c.coverage?{complete:c.coverage.complete}:undefined,
     conversation:c.conversation?{signals:c.conversation.signals.map(s=>({kind:s.kind,evidence:s.evidence.map(e=>map.messageById.get(e.id)).filter(Boolean)})),recentPurposes:c.conversation.recentPurposes.map(x=>({message:map.messageById.get(x.messageId),act:x.act,purpose:x.purpose,excerpt:x.excerpt})),previousAssessment:c.conversation.previousAssessment}:undefined,
     agenda:c.agenda?{now:c.agenda.now,timeWakeEnabled:c.agenda.timeWakeEnabled,pending:c.agenda.pending.map(x=>({entryId:x.entryId,kind:x.kind,status:x.status,effectiveAt:x.effectiveAt,reason:x.reason})),triggered:c.agenda.triggered.map(x=>({entryId:x.entryId,kind:x.kind,status:x.status,effectiveAt:x.effectiveAt,reason:x.reason}))}:undefined,
-    retrieved:(c.retrieved??[]).map(r=>({request:r.request,messages:r.messages.map(message),memories:r.memories.map(memory),sources:(r.sources??[]).map(source),nextCursor:r.nextCursor})),
+    retrieved:(c.retrieved??[]).map(r=>({request:{kind:r.request.kind,query:r.request.kind==='source'?map.sourceById.get(r.request.query)??null:r.request.kind==='message'?map.messageById.get(r.request.query)??null:r.request.query,cursor:r.request.cursor},messages:r.messages.map(message),memories:r.memories.map(memory),sources:(r.sources??[]).map(source),nextCursor:r.nextCursor})),
     recall:c.recall?{selected:c.recall.selected.map(x=>({ref:map.memoryById.get(x.id),score:x.score,provenance:x.provenance})).filter(x=>x.ref),omitted:c.recall.omittedForBudget.length}:undefined,
   };
 }
@@ -141,7 +149,8 @@ function bindAction(kind:RunKind,action:any,c:Context,map:ModelRefMap):unknown{
   return {notes:action.notes.map((n:any)=>({text:n.text,sourceMessageIds:n.sources.map((r:string)=>need(map.messageByRef.get(r)).id)})),...action.changes?{changes:action.changes.map((x:any)=>({operation:x.operation,text:x.text,sourceMessageIds:x.sources.map((r:string)=>need(map.messageByRef.get(r)).id),meaning:{subjectId:x.meaning.subject?need(map.participantByRef.get(x.meaning.subject)):null,topic:x.meaning.topic,key:x.meaning.key,value:x.meaning.value,epistemic:x.meaning.epistemic,validFrom:x.meaning.validFrom,validTo:x.meaning.validTo,aliases:x.meaning.aliases},targets:x.targets.map((r:string)=>need(map.memoryByRef.get(r))),parents:x.parents.map((r:string)=>need(map.memoryByRef.get(r)))}))}:{}};
 }
 export function bindModelOutput(kind:RunKind,value:unknown,c:Context):unknown{
-  const parsed=ModelWireOutputSchemas[kind].parse(value),lookup=LookupSchema.safeParse(parsed);if(lookup.success)return lookup.data;
-  const map=refs(c),stateful=parsed as {action:unknown;stateDelta:z.infer<typeof ModelStateDeltaSchema>|null};
+  const parsed=ModelWireOutputSchemas[kind].parse(value),map=refs(c),lookup=ModelLookupSchema.safeParse(parsed);
+  if(lookup.success)return LookupSchema.parse({decision:'LOOKUP',requests:lookup.data.requests.map(r=>({kind:r.kind,query:r.kind==='source'?need(map.sourceByRef.get(r.query)).id:r.kind==='message'?need(map.messageByRef.get(r.query)).id:r.query,cursor:r.cursor}))});
+  const stateful=parsed as {action:unknown;stateDelta:z.infer<typeof ModelStateDeltaSchema>|null};
   return {action:bindAction(kind,stateful.action,c,map),statePatch:bindDelta(stateful.stateDelta,c,map)};
 }
