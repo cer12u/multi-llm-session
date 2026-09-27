@@ -16,7 +16,7 @@ it.each(['none','schema'] as const)('R8-MEMORY-001: %s actual Worker HTTP retain
       let text='';for await(const chunk of req){text+=String(chunk);if(text.length>1048576)throw new Error('SYNTHETIC_TOO_LARGE');}
       captured=JSON.parse(text);authorization=req.headers.authorization??'';
       const action={decision:'ABSTAIN',reason:'synthetic transport proof only'};
-      res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(jsonMode==='schema'?{result:action}:action)}}],usage:{prompt_tokens:33,completion_tokens:9}}));
+      res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(jsonMode==='schema'?{result:{action,stateDelta:null}}:action)}}],usage:{prompt_tokens:33,completion_tokens:9}}));
     }catch{res.statusCode=500;res.end('{}');}
   });
   try{
@@ -55,17 +55,26 @@ it.each(['none','schema'] as const)('R8-MEMORY-001: %s actual Worker HTTP retain
     expect(authorization).toBe('Bearer synthetic-credential-not-for-production');
     expect(captured).toHaveProperty('max_completion_tokens',profile.maxOutputTokens);
     expect(captured).not.toHaveProperty('max_tokens');expect(captured).not.toHaveProperty('temperature');
-    const supplied=JSON.parse(captured!.messages.find(m=>m.role==='user')!.content) as Context;
-    expect(supplied.self.id).toBe(owner.id);expect(supplied.messages.some(m=>m.id===query.id)).toBe(true);
-    expect(supplied.memories.some(m=>m.id===ownMemory)).toBe(true);
+    const supplied=JSON.parse(captured!.messages.find(m=>m.role==='user')!.content) as any;
     expect(JSON.stringify(supplied)).not.toContain('PEER_PRIVATE_MUST_NEVER_REACH_OWNER');
-    expect(supplied.retrieved!.flatMap(r=>r.messages).find(m=>m.id===source.id)).toMatchObject({revision:source.revision,text:source.text,deleted:false});
-    expect(supplied.observation!.messages).toContainEqual({kind:'message',id:source.id,version:source.revision});
     const stored=f.store.get<{kind:ClaimedRun['kind'];context_json:string;state:string}>('SELECT kind,context_json,state FROM runs WHERE agent_id=? ORDER BY rowid DESC LIMIT 1',owner.id)!;
-    expect(stored.state).toBe('DONE');expect(JSON.parse(stored.context_json)).toEqual(supplied);
-    expect(captured).toEqual(modelRequest(profile,stored.kind,supplied,{maxChars:f.config.defaults.contextChars}));
-    expect(estimatedRequestTokens(captured!)+profile.maxOutputTokens).toBeLessThanOrEqual(supplied.inputBudget!.maxTokens);
-    expect(supplied.inputBudget!.maxTokens).toBe(131072);expect(f.service.session(id).call_count).toBe(count+1);
+    const internal=JSON.parse(stored.context_json) as Context;expect(stored.state).toBe('DONE');
+    if(jsonMode==='schema'){
+      expect(supplied.self).toMatchObject({ref:'p0',name:owner.name});expect(supplied.self).not.toHaveProperty('id');expect(supplied.self).not.toHaveProperty('privateState');
+      expect(supplied.messages.some((m:{text:string})=>m.text===query.text)).toBe(true);
+      expect(supplied.memories.some((m:{text:string})=>m.text==='保存された本人用の連絡事項')).toBe(true);
+      expect(supplied.retrieved.flatMap((r:any)=>r.messages).find((m:any)=>m.text===source.text)).toMatchObject({text:source.text,deleted:false});
+      for(const field of ['agentId','sessionId','expectedVersion','observationId','sourceMessageIds','throughInput'])expect(JSON.stringify(supplied)).not.toContain(field);
+    }else{
+      expect(supplied.self.id).toBe(owner.id);expect(supplied.messages.some((m:any)=>m.id===query.id)).toBe(true);
+      expect(supplied.memories.some((m:any)=>m.id===ownMemory)).toBe(true);
+      expect(supplied.retrieved!.flatMap((r:any)=>r.messages).find((m:any)=>m.id===source.id)).toMatchObject({revision:source.revision,text:source.text,deleted:false});
+      expect(supplied.observation!.messages).toContainEqual({kind:'message',id:source.id,version:source.revision});
+      expect(internal).toEqual(supplied);
+    }
+    expect(captured).toEqual(modelRequest(profile,stored.kind,internal,{maxChars:f.config.defaults.contextChars}));
+    expect(estimatedRequestTokens(captured!)+profile.maxOutputTokens).toBeLessThanOrEqual(internal.inputBudget!.maxTokens);
+    expect(internal.inputBudget!.maxTokens).toBe(131072);expect(f.service.session(id).call_count).toBe(count+1);
     expect(f.service.session(id).bot_count).toBe(0);
   }finally{await app.close();f.close();provider.closeAllConnections();await new Promise<void>(done=>provider.close(()=>done()));}
 },15000);
