@@ -1,6 +1,7 @@
 import { longRequestFetch } from '../../packages/models/long-request.js';
 import { LookupSchema, type Context, type ClaimedRun, type ModelErrorCode, type Usage } from '../../packages/contracts/index.js';
 import { credential } from '../../packages/config/credentials.js';
+import { bindModelOutput, parseModelOutput } from '../../packages/models/model-contract.js';
 import { HttpModel, MockModel, ModelError, parseOutput, type Model } from '../../packages/models/index.js';
 
 export class CoreError extends Error {
@@ -54,8 +55,14 @@ export class WorkerRuntime {
         const result=await model.complete(run.kind,context,{signal:AbortSignal.any([combined,AbortSignal.timeout(run.timeoutMs)]),maxChars:run.contextChars,...invalid?{repair:invalid}:{}});
         await this.retryResult(base+'/calls/'+callId,{token:run.token,usage:result.usage,error:null});callId=null;
         let parsed:unknown;
-        try {parsed=parseOutput(run.kind,result.text,run.profile.jsonMode==='schema'&&run.profile.provider!=='mock');}
-        catch(e) {if(!repaired){repaired=true;invalid=result.text.slice(0,2000);stage='repair';continue;}throw e;}
+        try {
+          parsed=run.profile.provider==='mock'
+            ?parseOutput(run.kind,result.text,false)
+            :bindModelOutput(run.kind,parseModelOutput(run.kind,result.text,run.profile.jsonMode==='schema'),context);
+        } catch {
+          if(!repaired){repaired=true;invalid=result.text.slice(0,2000);stage='repair';continue;}
+          throw new ModelError('FORMAT_ERROR');
+        }
         const lookup=LookupSchema.safeParse(parsed);
         if(lookup.success) {
           if(lookups>=2)throw new ModelError('FORMAT_ERROR');
@@ -71,7 +78,6 @@ export class WorkerRuntime {
       const code:ModelErrorCode=e instanceof ModelError?e.code:invalidResult?'FORMAT_ERROR':combined.aborted?'CANCELLED':'API_ERROR';
       const usage:Usage=e instanceof ModelError&&e.usage?e.usage:{inputTokens:null,outputTokens:null};
       if(callId) await this.client.request(base+'/calls/'+callId,{token:run.token,usage,error:code,retryAfterMs:e instanceof ModelError?e.retryAfterMs:0}).catch(()=>{});
-      // Stale generations are already fenced. Other rejected results must not leave a reusable active run.
       if(!stale) await this.client.request(base+'/failure',{...auth,code}).catch(()=>{});
       return true;
     } finally { clearInterval(heartbeat); this.controller=null; }
