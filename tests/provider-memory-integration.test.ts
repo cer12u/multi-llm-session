@@ -60,7 +60,7 @@ it.each(['none','schema'] as const)('R8-MEMORY-001: %s actual Worker HTTP retain
     const stored=f.store.get<{kind:ClaimedRun['kind'];context_json:string;state:string}>('SELECT kind,context_json,state FROM runs WHERE agent_id=? ORDER BY rowid DESC LIMIT 1',owner.id)!;
     const internal=JSON.parse(stored.context_json) as Context;expect(stored.state).toBe('DONE');
     if(jsonMode==='schema'){
-      expect(supplied.self).toMatchObject({ref:'p0',name:owner.name});expect(supplied.self).not.toHaveProperty('id');expect(supplied.self).not.toHaveProperty('privateState');
+      expect(supplied.self).toMatchObject({ref:'p0',name:f.service.snapshot(id).agents.find(a=>a.id===owner.id)!.name});expect(supplied.self).not.toHaveProperty('id');expect(supplied.self).not.toHaveProperty('privateState');
       expect(supplied.messages.some((m:{text:string})=>m.text===query.text)).toBe(true);
       expect(supplied.memories.some((m:{text:string})=>m.text==='保存された本人用の連絡事項')).toBe(true);
       expect(supplied.retrieved.flatMap((r:any)=>r.messages).find((m:any)=>m.text===source.text)).toMatchObject({text:source.text,deleted:false});
