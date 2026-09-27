@@ -20,24 +20,26 @@ let injected=false,faults=0,requests=0,providerFailure:string|null=null;
 const ownerRequests=new Map<string,number>();
 const provider=createServer((req,res)=>{void (async()=>{
   const chunks:Buffer[]=[];let bytes=0;for await(const chunk of req){const b=Buffer.from(chunk);bytes+=b.length;assert(bytes<=1048576,'SOAK_REQUEST_TOO_LARGE');chunks.push(b);}
-  const request=JSON.parse(Buffer.concat(chunks).toString()),system=String(request.messages[0].content),context:Context=JSON.parse(request.messages.find((m:{role:string})=>m.role==='user').content);
+  const request=JSON.parse(Buffer.concat(chunks).toString()),system=String(request.messages[0].content),context=JSON.parse(request.messages.find((m:{role:string})=>m.role==='user').content);
   const index=Number(String(request.model).split('-').at(-1));assert(index>=0&&index<3,'SOAK_MODEL_ID');
   assert.equal(req.headers.authorization,'Bearer synthetic-soak-key-'+index,'SOAK_CREDENTIAL_ROUTING');
-  requests++;assert(requests<=limits.maxRequests,'SOAK_REQUEST_CAP');ownerRequests.set(context.self.id,(ownerRequests.get(context.self.id)??0)+1);
+  assert.equal(/agentId|sessionId|expectedVersion|observationId/.test(JSON.stringify(request)),false,'SOAK_MODEL_CONTRACT_BINDING_LEAK');
+  requests++;assert(requests<=limits.maxRequests,'SOAK_REQUEST_CAP');ownerRequests.set(String(index),(ownerRequests.get(String(index))??0)+1);
   await sleep(index===2?100:20);
   if(injected&&index===2){injected=false;faults++;res.writeHead(429,{'retry-after':'1'});res.end('synthetic failure');return;}
-  const original=context.messages.find(m=>m.authorId===null&&!m.deleted),state=context.self.privateState!;
+  const original=context.messages.find((m:{author:string;deleted:boolean})=>m.author==='human'&&!m.deleted),state=context.self.state as {id:string;text:string}[];
   let action:unknown;
-  if(system.includes('Process exactly the supplied unprocessed delivery window'))action={notes:original?[{text:'Synthetic retained original '+original.sequence,sourceMessageIds:[original.id]}]:[]};
-  else if(system.includes('Write only your own proposed utterance'))action={decision:'DRAFT',text:context.candidate?.intent.intent??'Synthetic contribution'};
-  else if(system.includes('Read the new context and delta'))action=context.coverage?.complete?{decision:'KEEP'}:{decision:'REWRITE',text:context.candidate!.text,intent:context.candidate!.intent};
+  const fixed=(decision:string,overrides:Record<string,unknown>={})=>({decision,reason:null,text:null,act:null,intent:null,reply:null,to:[],defer:null,afterMs:null,waitFor:null,...overrides});
+  if(system.includes('Process the supplied unprocessed delivery window'))action={action:{notes:original?[{text:'synthetic retained note for '+index,sources:[original.ref]}]:[],changes:[]},state:null};
+  else if(system.includes('Write only your own proposed utterance'))action={lookup:[],action:fixed('DRAFT',{text:context.candidate?.intent.intent??'Synthetic contribution'}),state:null};
+  else if(system.includes('Review your private candidate'))action={lookup:[],action:context.coverage?.complete?fixed('KEEP'):fixed('REWRITE',{text:context.candidate!.text,act:context.candidate!.intent.act,intent:context.candidate!.intent.intent,reply:context.candidate!.intent.reply,to:context.candidate!.intent.to}),state:null};
   else {
-    const topic=context.messages.filter(m=>m.authorId===null&&m.text.startsWith('SOAK_TOPIC_')).at(-1);
-    const previous=state.entries.find(e=>e.id==='soak-topic')?.text;
+    const topic=context.messages.filter((m:{author:string;text:string})=>m.author==='human'&&m.text.startsWith('SOAK_TOPIC_')).at(-1);
+    const previous=state.find(e=>e.id==='soak-topic')?.text;
     const speak=system.includes('Choose whether YOU want to speak now')&&topic&&previous!==topic.text;
-    const intent:Intent={act:'comment',intent:'Synthetic contribution to '+(topic?.text??'initial input'),replyTo:topic?.id??null,addressedTo:[]};
-    action={action:speak?{decision:'SPEAK',intent}:{decision:'ABSTAIN',reason:'synthetic owner chooses quiet'},statePatch:{agentId:state.agentId,sessionId:state.sessionId,expectedVersion:state.version,observationId:context.observation!.id,
-      upsert:[{id:'soak-retained',kind:'interest',text:'SOAK_PRIVATE_OWNER_'+index,evidence:[],resume:null},...speak?[{id:'soak-topic',kind:'interest',text:topic!.text,evidence:[],resume:null}]:[]],remove:[]}};
+    const semantic=(id:string,text:string)=>({id,kind:'interest',text,evidence:[],memories:[],question:null,participation:null,resume:null});
+    action={lookup:[],action:speak?fixed('SPEAK',{act:'comment',intent:'Synthetic contribution to '+topic!.text,reply:topic!.ref}):fixed('ABSTAIN',{reason:'synthetic owner chooses quiet'}),
+      state:{upsert:[semantic('soak-retained','SOAK_PRIVATE_OWNER_'+index),...speak?[semantic('soak-topic',topic!.text)]:[]],remove:[]}};
   }
   res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{finish_reason:'stop',message:{content:JSON.stringify(action)}}],...(index===1?{}:{usage:{prompt_tokens:23,completion_tokens:13}})}));
 })().catch(error=>{providerFailure=error instanceof Error?error.message:'SOAK_PROVIDER_FAILURE';if(!res.headersSent)res.writeHead(500);res.end('synthetic fixture failure');});});

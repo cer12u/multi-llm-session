@@ -26,7 +26,8 @@ it.each([3,5,8])('R2-LOOP-HTTP-001: %i independent workers consume complete rang
     const workers=captured.map((inputs,index)=>new WorkerRuntime(
       new CoreClient(`http://127.0.0.1:${address.port}`,f.config.workerTokens[`worker-${index}`]),{},run=>new HttpModel(profile,undefined,async(_url,init)=>{
         const body=JSON.parse(String(init!.body)) as {messages:{role:string;content:string}[]};
-        const context=JSON.parse(body.messages.find(m=>m.role==='user')!.content) as Context;inputs.push(context);
+        const supplied=JSON.parse(body.messages.find(m=>m.role==='user')!.content);expect(supplied.self.ref).toBe('self');expect(JSON.stringify(supplied)).not.toContain(run.context.self.id);
+        const context=run.context;inputs.push(structuredClone(context));
         const action=run.kind==='memory'?{notes:[]}:{decision:'ABSTAIN',reason:'入力配送を検査する合成応答'};
         const result={action,statePatch:context.self.privateState!.entries.length?null:patch(context,`private-worker-${index}-held-question`)};
         return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(result)}}]}));
@@ -63,8 +64,8 @@ it('R2-LOOP-HTTP-002: input changed during inference is cancelled and retried as
     const worker=new WorkerRuntime(new CoreClient(`http://127.0.0.1:${address.port}`,f.config.workerTokens['worker-0']),{},run=>{
       runIds.push(run.id);
       return new HttpModel(profile,undefined,async(_url,init)=>{
-        const body=JSON.parse(String(init!.body));const context=JSON.parse(body.messages.find((m:{role:string})=>m.role==='user').content) as Context;
-        contexts.push(context);calls++;
+        const body=JSON.parse(String(init!.body));const supplied=JSON.parse(body.messages.find((m:{role:string})=>m.role==='user').content);
+        expect(supplied.self.ref).toBe('self');const context=run.context;contexts.push(structuredClone(context));calls++;
         if(calls===1)f.service.changeMessage(f.id,source.id,'変更後の説明',randomUUID());
         const result={action:{decision:'ABSTAIN',reason:'本人の理解を更新'},statePatch:patch(context,'根拠に結びつく理解')};
         return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(result)}}]}));
@@ -86,9 +87,9 @@ it('R2-LOOP-HTTP-003: malformed state-version output terminates its run and resp
   try{
     f.say('本人の入力');let calls=0;
     await app.listen({host:'127.0.0.1',port:0});const address=app.server.address();if(!address||typeof address==='string')throw new Error('No port');
-    const worker=new WorkerRuntime(new CoreClient(`http://127.0.0.1:${address.port}`,f.config.workerTokens['worker-0']),{},()=>new HttpModel(profile,undefined,async(_url,init)=>{
-      const body=JSON.parse(String(init!.body));const context=JSON.parse(body.messages.find((m:{role:string})=>m.role==='user').content) as Context;
-      const change=patch(context,'本人の疑問');if(++calls===1)change.expectedVersion++;
+    const worker=new WorkerRuntime(new CoreClient(`http://127.0.0.1:${address.port}`,f.config.workerTokens['worker-0']),{},run=>new HttpModel(profile,undefined,async(_url,init)=>{
+      const body=JSON.parse(String(init!.body));expect(JSON.parse(body.messages.find((m:{role:string})=>m.role==='user').content).self.ref).toBe('self');
+      const context=run.context;const change=patch(context,'本人の疑問');if(++calls===1)change.expectedVersion++;
       return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({action:{decision:'ABSTAIN',reason:'試験'},statePatch:change})}}]}));
     }));
     await worker.register();f.start();await worker.once();

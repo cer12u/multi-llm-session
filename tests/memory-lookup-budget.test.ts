@@ -2,6 +2,7 @@ import {expect,it} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {fixture} from './helpers.js';
 import {lookupSelectionSettings} from '../packages/models/context-budget.js';
+import {projectModelContext} from '../packages/models/model-contract.js';
 import type {ClaimedRun} from '../packages/contracts/index.js';
 
 function recordedCall(f:ReturnType<typeof fixture>,run:ClaimedRun,stage:'primary'|'lookup'='primary'){
@@ -16,7 +17,7 @@ it('R5-BUDGET-023: two explicit lookups fit beside a saturated observation prefi
     for(let i=0;i<120;i++)f.say('日々の会話 '.repeat(8)+i);
     const last=f.say('次の取り決めの原文：木曜日');f.start();const run=f.claim()!;
     expect(run).not.toBeNull();expect(run.context.delivery!.complete).toBe(false);
-    expect(JSON.stringify(run.context).length).toBeLessThan(lookupSelectionSettings(run.profile,f.config.defaults).contextChars);
+    expect(JSON.stringify(projectModelContext(run.context)).length).toBeLessThan(lookupSelectionSettings(run.profile,f.config.defaults).contextChars);
     recordedCall(f,run);
     const one=f.service.retrieve('worker-0',run.workerEpoch,run.id,run.token,randomUUID(),[{kind:'message',query:first.id,cursor:null}]);
     expect(one.delivery).toEqual(run.context.delivery);expect(one.messages).toEqual(run.context.messages);

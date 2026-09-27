@@ -3,6 +3,7 @@ import { fixture } from './helpers.js';
 import { buildServer } from '../apps/core/server.js';
 import { CoreClient, WorkerRuntime } from '../apps/agent-worker/runtime.js';
 import { ScriptedModel, modelRequest } from '../packages/models/index.js';
+import { projectModelContext } from '../packages/models/model-contract.js';
 import type { Context, QuestionAssessment } from '../packages/contracts/index.js';
 
 /** Scripts specify only this test's replies; the production scheduler has no prescribed turn order. */
@@ -54,8 +55,8 @@ it('R6-QUESTION-007: three real HTTP Workers retain their separate interpretatio
     const last=captured[2].at(-1)!;
     const body=modelRequest(f.config.profiles[0],'draft',last,{maxChars:f.config.defaults.contextChars});
     const messages=body.messages as {role:string;content:string}[];
-    expect(messages.find(m=>m.role==='system')!.content).toContain('Questions are not globally resolved');
-    expect(JSON.parse(messages.find(m=>m.role==='user')!.content)).toEqual(last);
+    expect(messages.find(m=>m.role==='system')!.content).toContain('Question interpretation belongs to you');
+    expect(JSON.parse(messages.find(m=>m.role==='user')!.content)).toEqual(projectModelContext(last));
     expect(f.service.snapshot(f.id).messages).toHaveLength(3);expect(f.service.session(f.id).call_count).toBe(8);
     expect(f.store.get<{answered_by:string|null}>('SELECT answered_by FROM pending_questions WHERE message_id=?',questionId)!.answered_by).toBeNull();
     expect(JSON.stringify(f.service.exportSession(f.id))).not.toContain('PRIVATE_C_QUESTION_ASSESSMENT');
