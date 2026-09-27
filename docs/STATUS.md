@@ -1,6 +1,6 @@
 # 実装状況と未実証事項
 
-更新：2026-09-26 JST。要件管理はIssue #4。実装、E2E、合成負荷、実Provider、人間の読解評価は別判定です。Issue数・試験数で完成率を算出しません。
+更新：2026-09-28 JST。要件管理はIssue #4。実装、E2E、合成負荷、実Provider、人間の読解評価は別判定です。Issue数・試験数で完成率を算出しません。
 
 ## mainと現在の変更
 
@@ -11,6 +11,10 @@ PR #31〜#48の私有状態/観測/予定/記憶/会話制御/定義/資料/履�
 PR #52の継続負荷/復旧/CLI/契約差分と、#53のsource/image配布・新規導入/backup/restoreはmainへマージ済みです。#53のマージは`d4838e410e777e707bade8e4db50f72128f79793`。#52は事前条件で600739msの合成運用、#53は保存した配布物そのものの再導入を確認しました。実LLM検証とは別です。
 
 PR #54は実登録76 APIと共有入力契約を対応付けるOpenAPI 3.1.1/CLI/オフライン出力、#55は診断記録が容量上限に達した実験でも結果・usage・検証済みDBを保持する変更です。実装・マージ・対象headのCI結果は各PRの確定記録で区別します。既存単体試験は維持し、新規受け入れは実HTTP/CLI/Core/Worker/SQLiteのE2Eです。
+PR #56で明示的なモデル要求待機を最大900秒まで設定可能にし、既定90秒・短いrenewable lease・停止/世代fenceは維持しました。310実秒の遅延応答を実Core/3 Worker/HTTP/SQLiteで受理し、pause後の遅着結果拒否も確認済みです。
+
+構造化出力を使う実モデル経路は、モデル自身にagent/session UUID、state version、observation hash、evidence version等を再生成させる旧境界が小型モデルへ不要な負荷を課していたため、モデル向けsemantic wireと内部transaction contractを分離します。モデルは短いrequest-local参照と意味判断だけを扱い、Workerが信頼済みContextからbindingを復元し、Coreの既存検査を最終権威として維持します。詳細はMODEL_WIRE.md。これは実LLM会話品質の合格とは別です。
+
 
 ## 要件別の判定
 
